@@ -33,33 +33,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The buildable project lives in app/, but the community build action builds
+      # from the repo root (it copies the whole workspace and runs mb2 there, which
+      # finds rpm/*.spec). Stage app/'s contents at the root so the action — which
+      # handles the SDK container, scratchbox2 mounts and build location correctly,
+      # unlike a hand-rolled docker run — can build it as-is.
+      - name: Stage app/ at the repository root
+        run: cp -rT app . && rm -rf app
+
       - name: Build RPM in the Sailfish OS Platform SDK
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/RPMS"
-          docker run --rm --privileged \
-            -v "$GITHUB_WORKSPACE:/workspace" \
-            -e SFOS_RELEASE \
-            -e ARCH="${{ matrix.arch }}" \
-            "coderus/sailfishos-platform-sdk:${SFOS_RELEASE}" \
-            /bin/bash -c '
-              set -x
-              cp -r /workspace/app /tmp/src
-              mkdir -p /tmp/shadow && cd /tmp/shadow
-              # Make rpmbuild verbose (-- passes args through to rpmbuild) so its
-              # real error after "Building for target" is printed instead of lost.
-              mb2 -t "SailfishOS-${SFOS_RELEASE}-${ARCH}" build /tmp/src -- -vv
-              rc=$?
-              echo "::group::diagnostics rc=$rc"
-              echo "--- rpm/ in source ---"; ls -la /tmp/src/rpm/
-              echo "--- .mb2 ---"; ls -laR /tmp/shadow/.mb2 2>&1 | head -40
-              echo "--- head .mb2/spec ---"; sed -n "1,40p" /tmp/shadow/.mb2/spec 2>&1
-              echo "--- build logs ---"; find /tmp/shadow /tmp/src -name "*.log" 2>/dev/null | head
-              echo "--- RPMS ---"; ls -laR /tmp/shadow/RPMS 2>&1 | head
-              echo "::endgroup::"
-              if [ "$rc" -ne 0 ]; then exit "$rc"; fi
-              mkdir -p /workspace/RPMS
-              cp -rv RPMS/*.rpm /workspace/RPMS/
-            '
+        uses: coderus/github-sfos-build@master
+        with:
+          release: ${{ env.SFOS_RELEASE }}
+          arch: ${{ matrix.arch }}
 
       - name: List built RPMs
         run: ls -l "$GITHUB_WORKSPACE/RPMS"
