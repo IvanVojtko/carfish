@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+X-Nemo-Application-Type=silica-qt5
+Icon=carfish
+Exec=carfish
+Name=Carfish
+
+[X-Sailjail]
+# Needs raw system D-Bus access to BlueZ/connman and /dev/usb_accessory,
+# which Sailjail profiles do not grant to third party apps yet.
+Sandboxing=Disabled

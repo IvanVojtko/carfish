@@ -1,0 +1,14 @@
+[Unit]
+Description=Carfish privileged WiFi/routing helper
+After=connman.service dbus.service
+Wants=connman.service
+
+[Service]
+Type=dbus
+BusName=org.carfish.Helper
+ExecStart=/usr/bin/carfish-helper
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,107 @@
+# ======================================================================
+# SENSITIVE / LEGAL — never commit these
+# ======================================================================
+# TLS certificates and private keys. Carfish never bundles key material;
+# the user supplies cert/key by path at runtime. Keep ALL of them out of git
+# so a stray phone-cert.pem / phone-key.pem can never be committed.
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*.p12
+*.pfx
+*.jks
+*.keystore
+phone-cert*
+phone-key*
+cert/
+
+# Reverse-engineering workspace: decompiled Google GMS/Gearhead sources,
+# extracted certs, jadx output, intermediate dumps. Copyrighted Google code —
+# must not be redistributed. (Multi-GB.)
+qwen/
+
+# Proprietary / copyrighted binaries used only as local reference material.
+*.apk
+*.apkm
+*.xapk
+*.dex
+com.google.android.projection.gearhead*
+
+# Anything a user drops in these is treated as private reference material.
+reference/
+vendor-dumps/
+secrets/
+*.secret
+*secret*
+*token*.txt
+.env
+.env.*
+
+# ======================================================================
+# BUILD OUTPUT
+# ======================================================================
+build/
+build-*/
+*-build/
+RPMS/
+SRPMS/
+*.rpm
+*.tar.bz2
+*.tar.gz
+*.tar.xz
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+*.cmake.stamp
+compile_commands.json
+
+# Qt / moc / generated
+moc_*.cpp
+*_autogen/
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+
+# Protobuf generated sources (regenerated at build time from *.proto)
+proto-gen/
+*.pb.cc
+*.pb.h
+*_pb2.py
+
+# Bundled third-party build artifacts
+app/thirdparty/openh264/*.o
+app/thirdparty/openh264/*.a
+openh264-obj/
+
+# ======================================================================
+# GENERATED / LOCAL ARTIFACTS
+# ======================================================================
+carfish-preview.png
+car_*.png
+*-preview.png
+aoa-probe.log
+carfish.log
+*.log
+
+# ======================================================================
+# EDITOR / OS
+# ======================================================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.user
+.qtc_clangd/
+.clangd/
+.cache/
+tags

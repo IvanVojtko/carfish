@@ -1,0 +1,144 @@
+// Wireless Projection Protocol (WPP): Bluetooth RFCOMM bootstrap for
+// wireless Android Auto. Field numbers recovered from Android Auto 18.0
+// (enum ydb and message classes ydh/ycz/yda/ydj/ydk/ycx/ydi/ydc/ydd).
+// Wire format per message: u16 BE payload length, u16 BE message id, payload.
+syntax = "proto2";
+option optimize_for = LITE_RUNTIME;
+
+package wpp;
+
+enum MessageId {
+    WIFI_START_REQUEST = 1;
+    WIFI_INFO_REQUEST = 2;
+    WIFI_INFO_RESPONSE = 3;
+    WIFI_VERSION_REQUEST = 4;
+    WIFI_VERSION_RESPONSE = 5;
+    WIFI_CONNECT_STATUS = 6;
+    WIFI_START_RESPONSE = 7;
+    WIFI_PING_REQUEST = 8;
+    WIFI_PING_RESPONSE = 9;
+    WIFI_CONNECTION_REJECTION = 10;
+    WIFI_SETUP_INFO = 11;
+}
+
+// Status values as they appear on the wire.
+enum Status {
+    STATUS_SUCCESS = 0;
+    STATUS_UNSOLICITED_MESSAGE = 1;
+    STATUS_NO_COMPATIBLE_VERSION = -1;
+    STATUS_WIFI_INACCESSIBLE_CHANNEL = -2;
+    STATUS_WIFI_INCORRECT_CREDENTIALS = -3;
+    STATUS_PROJECTION_ALREADY_STARTED = -4;
+    STATUS_WIFI_DISABLED = -5;
+    STATUS_WIFI_NOT_YET_STARTED = -6;
+    STATUS_INVALID_HOST = -7;
+    STATUS_NO_SUPPORTED_WIFI_CHANNELS = -8;
+    STATUS_INSTRUCT_USER_TO_CHECK_THE_PHONE = -9;
+    STATUS_PHONE_WIFI_DISABLED = -10;
+    STATUS_WIFI_NETWORK_UNAVAILABLE = -11;
+}
+
+enum SecurityMode {
+    UNKNOWN_SECURITY_MODE = 0;
+    OPEN = 1;
+    WEP_64 = 2;
+    WEP_128 = 3;
+    WPA_PERSONAL = 4;
+    WPA2_PERSONAL = 8;
+    WPA_WPA2_PERSONAL = 12;
+    WPA_ENTERPRISE = 20;
+    WPA2_ENTERPRISE = 24;
+    WPA_WPA2_ENTERPRISE = 28;
+    WPA3_PERSONAL = 32;
+    WPA2_WPA3_PERSONAL = 40;
+}
+
+enum AccessPointType {
+    STATIC = 0;
+    DYNAMIC = 1;
+}
+
+enum ChannelType {
+    CHANNELS_5GHZ_ONLY = 0;
+    CHANNELS_24GHZ_ONLY = 1;
+    CHANNELS_DUAL_BAND = 2;
+    NO_CHANNELS_SUPPORTED = 3;
+}
+
+message Endpoint {
+    optional string ip_address = 1;
+    optional int32 port = 2;
+}
+
+// HU -> phone (field contents of xua are only partially known; kept opaque)
+message WifiVersionRequest {
+    optional int32 major = 1;
+    optional int32 minor = 2;
+    optional ChannelType channel_type = 3;
+    repeated int32 supported_channels_mhz = 4;
+    optional bytes head_unit_info = 5;
+    optional Endpoint wpp_tcp_endpoint = 6;
+}
+
+message DeviceInfo {
+    optional string device_uuid = 1;
+    optional string session_id = 2;
+    optional string bluetooth_name = 3;
+    optional string bluetooth_mac = 4;
+}
+
+// phone -> HU
+message WifiVersionResponse {
+    optional int32 major = 1;
+    optional int32 minor = 2;
+    optional string device_serial = 3;
+    optional int32 status = 4;
+    optional ChannelType channel_type = 5;
+    optional DeviceInfo device_info = 6;
+    optional bytes setup_token = 7;
+}
+
+// HU -> phone (or empty phone -> HU for a phone initiated start)
+message WifiStartRequest {
+    optional string ip_address = 1;
+    optional int32 port = 2;
+    optional int32 reason = 3;
+}
+
+// phone -> HU (or HU -> phone answering a phone initiated start)
+message WifiStartResponse {
+    optional string ip_address = 1;
+    optional int32 port = 2;
+    optional int32 status = 3;
+}
+
+// phone -> HU, no fields
+message WifiInfoRequest {
+}
+
+// HU -> phone
+message WifiInfoResponse {
+    optional string ssid = 1;
+    optional string key = 2;
+    optional string bssid = 3;
+    optional SecurityMode security_mode = 4;
+    optional AccessPointType access_point_type = 5;
+}
+
+// phone -> HU
+message WifiConnectStatus {
+    optional int32 status = 1;
+    optional string error_message = 2;
+}
+
+message WifiPingRequest {
+    optional int64 timestamp_ms = 1;
+}
+
+message WifiPingResponse {
+    optional int64 timestamp_ms = 1;
+}
+
+message WifiConnectionRejection {
+    optional int32 reason = 1;
+}

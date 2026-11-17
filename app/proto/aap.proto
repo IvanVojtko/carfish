@@ -1,0 +1,554 @@
+// Android Auto Protocol (AAP) messages used by the phone side.
+// Field numbers and types recovered from the protobuf-lite tables in
+// Android Auto 18.0 (obfuscated class names in brackets). Enum-typed fields
+// are declared as int32 so unknown values survive parsing; the enums below
+// document the known values.
+syntax = "proto2";
+option optimize_for = LITE_RUNTIME;
+
+package aap;
+
+// ---------------------------------------------------------------- message ids
+
+enum ControlMessage {
+    MSG_VERSION_REQUEST = 1;
+    MSG_VERSION_RESPONSE = 2;
+    MSG_ENCAPSULATED_SSL = 3;
+    MSG_AUTH_COMPLETE = 4;
+    MSG_SERVICE_DISCOVERY_REQUEST = 5;
+    MSG_SERVICE_DISCOVERY_RESPONSE = 6;
+    MSG_CHANNEL_OPEN_REQUEST = 7;
+    MSG_CHANNEL_OPEN_RESPONSE = 8;
+    MSG_CHANNEL_CLOSE_NOTIFICATION = 9;
+    MSG_PING_REQUEST = 11;
+    MSG_PING_RESPONSE = 12;
+    MSG_NAV_FOCUS_REQUEST = 13;
+    MSG_NAV_FOCUS_NOTIFICATION = 14;
+    MSG_BYEBYE_REQUEST = 15;
+    MSG_BYEBYE_RESPONSE = 16;
+    MSG_VOICE_SESSION_NOTIFICATION = 17;
+    MSG_AUDIO_FOCUS_REQUEST = 18;
+    MSG_AUDIO_FOCUS_NOTIFICATION = 19;
+    MSG_BATTERY_STATUS_NOTIFICATION = 23;
+    MSG_CALL_AVAILABILITY_STATUS = 24;
+    MSG_SERVICE_DISCOVERY_UPDATE = 26;
+    MSG_FRAMING_ERROR = 65535;
+}
+
+enum MediaMessage {
+    MEDIA_DATA = 0;              // u64 BE timestamp (us) + payload
+    MEDIA_CODEC_CONFIG = 1;      // payload only (SPS/PPS, AudioSpecificConfig)
+    MEDIA_SETUP = 32768;         // 0x8000 phone -> HU
+    MEDIA_START = 32769;         // 0x8001 phone -> HU
+    MEDIA_STOP = 32770;          // 0x8002 phone -> HU
+    MEDIA_CONFIG = 32771;        // 0x8003 HU -> phone
+    MEDIA_ACK = 32772;           // 0x8004
+    MEDIA_MICROPHONE_REQUEST = 32773;  // 0x8005 phone -> HU
+    MEDIA_MICROPHONE_RESPONSE = 32774; // 0x8006 HU -> phone
+    MEDIA_VIDEO_FOCUS_REQUEST = 32775;      // 0x8007 phone -> HU
+    MEDIA_VIDEO_FOCUS_NOTIFICATION = 32776; // 0x8008 HU -> phone
+}
+
+enum InputMessage {
+    INPUT_REPORT = 32769;          // 0x8001 HU -> phone
+    INPUT_KEY_BINDING_REQUEST = 32770;  // 0x8002 phone -> HU
+    INPUT_KEY_BINDING_RESPONSE = 32771; // 0x8003 HU -> phone
+}
+
+enum SensorMessage {
+    SENSOR_REQUEST = 32769;   // 0x8001 phone -> HU
+    SENSOR_RESPONSE = 32770;  // 0x8002 HU -> phone
+    SENSOR_BATCH = 32771;     // 0x8003 HU -> phone
+    SENSOR_ERROR = 32772;     // 0x8004 HU -> phone
+}
+
+// Instrument-cluster navigation status (turn-by-turn to the car's cluster).
+enum NavigationMessage {
+    NAV_STATUS_START = 32769;      // 0x8001 HU -> phone (turn our sender on)
+    NAV_STATUS_STOP = 32770;       // 0x8002 HU -> phone
+    NAV_STATUS = 32771;            // 0x8003 phone -> HU (NavigationStatus)
+    NAV_TURN_EVENT = 32772;        // 0x8004 phone -> HU (legacy, NavigationNextTurnEvent)
+    NAV_DISTANCE_EVENT = 32773;    // 0x8005 phone -> HU (legacy, NavigationNextTurnDistanceEvent)
+    NAV_STATE = 32774;             // 0x8006 phone -> HU (NavigationState)
+    NAV_CURRENT_POSITION = 32775;  // 0x8007 phone -> HU (NavigationCurrentPosition)
+}
+
+// --------------------------------------------------------------- value enums
+
+enum Status {
+    STATUS_SUCCESS = 0;
+    STATUS_UNSOLICITED = 1;
+    STATUS_NO_COMPATIBLE_VERSION = -1;
+    STATUS_CERTIFICATE_ERROR = -2;
+    STATUS_AUTHENTICATION_FAILURE = -3;
+}
+
+enum MediaCodecType {
+    CODEC_PCM = 1;
+    CODEC_AAC_LC = 2;
+    CODEC_H264_BP = 3;
+    CODEC_AAC_LC_ADTS = 4;
+    CODEC_VP9 = 5;
+    CODEC_AV1 = 6;
+    CODEC_H265 = 7;
+}
+
+enum AudioStreamType {
+    AUDIO_GUIDANCE = 1;
+    AUDIO_SYSTEM = 2;
+    AUDIO_MEDIA = 3;
+    AUDIO_TELEPHONY = 4;
+}
+
+enum VideoResolution {
+    RES_800x480 = 1;
+    RES_1280x720 = 2;
+    RES_1920x1080 = 3;
+    RES_2560x1440 = 4;
+    RES_3840x2160 = 5;
+    RES_720x1280 = 6;
+    RES_1080x1920 = 7;
+    RES_1440x2560 = 8;
+    RES_2160x3840 = 9;
+}
+
+enum VideoFrameRate {
+    FPS_60 = 1;
+    FPS_30 = 2;
+}
+
+enum VideoFocusMode {
+    FOCUS_PROJECTED = 1;
+    FOCUS_NATIVE = 2;
+    FOCUS_NATIVE_TRANSIENT = 3;
+    FOCUS_PROJECTED_NO_INPUT = 4;
+}
+
+enum AudioFocusRequestType {
+    AUDIO_FOCUS_GAIN = 1;
+    AUDIO_FOCUS_GAIN_TRANSIENT = 2;
+    AUDIO_FOCUS_GAIN_TRANSIENT_MAY_DUCK = 3;
+    AUDIO_FOCUS_RELEASE = 4;
+}
+
+enum AudioFocusState {
+    AUDIO_FOCUS_STATE_INVALID = 0;
+    AUDIO_FOCUS_STATE_GAIN = 1;
+    AUDIO_FOCUS_STATE_GAIN_TRANSIENT = 2;
+    AUDIO_FOCUS_STATE_LOSS = 3;
+    AUDIO_FOCUS_STATE_LOSS_TRANSIENT_CAN_DUCK = 4;
+    AUDIO_FOCUS_STATE_LOSS_TRANSIENT = 5;
+    AUDIO_FOCUS_STATE_GAIN_MEDIA_ONLY = 6;
+    AUDIO_FOCUS_STATE_GAIN_TRANSIENT_GUIDANCE_ONLY = 7;
+}
+
+enum TouchAction {
+    TOUCH_DOWN = 0;
+    TOUCH_UP = 1;
+    TOUCH_MOVE = 2;
+    TOUCH_POINTER_DOWN = 5;
+    TOUCH_POINTER_UP = 6;
+}
+
+enum SensorType {
+    SENSOR_LOCATION = 1;
+    SENSOR_COMPASS = 2;
+    SENSOR_SPEED = 3;
+    SENSOR_RPM = 4;
+    SENSOR_ODOMETER = 5;
+    SENSOR_FUEL = 6;
+    SENSOR_PARKING_BRAKE = 7;
+    SENSOR_GEAR = 8;
+    SENSOR_NIGHT_MODE = 10;
+    SENSOR_DRIVING_STATUS = 13;
+    SENSOR_ACCELEROMETER = 19;
+    SENSOR_GYROSCOPE = 20;
+    SENSOR_GPS_SATELLITE = 21;
+}
+
+// ------------------------------------------------------------ control channel
+
+// [xus] HU -> phone, plaintext
+message AuthComplete {
+    optional int32 status = 1; // required
+}
+
+// [ybl] phone -> HU
+message ServiceDiscoveryRequest {
+    optional bytes small_icon = 1;  // 32x32 PNG
+    optional bytes medium_icon = 2; // 64x64 PNG
+    optional bytes large_icon = 3;  // 128x128 PNG
+    optional string label = 4;
+    optional string device_name = 5;
+}
+
+// [xun]
+message AudioConfig {
+    optional uint32 sample_rate = 1;     // required
+    optional uint32 bits_per_sample = 2; // required
+    optional uint32 channels = 3;        // required
+}
+
+// [xxe]
+message Insets {
+    optional uint32 top = 1;
+    optional uint32 bottom = 2;
+    optional uint32 left = 3;
+    optional uint32 right = 4;
+}
+
+// [ybz]
+message UiConfig {
+    optional Insets margins = 1;
+    optional Insets content_insets = 2;
+    optional Insets stable_content_insets = 3;
+}
+
+// [ycn]
+message VideoConfig {
+    optional int32 resolution = 1;  // VideoResolution
+    optional int32 frame_rate = 2;  // VideoFrameRate
+    optional uint32 width_margin = 3;
+    optional uint32 height_margin = 4;
+    optional uint32 density = 5;    // dpi, must be > 0
+    optional uint32 decoder_additional_depth = 6;
+    optional uint32 pixel_aspect_ratio_e4 = 8;
+    optional uint32 real_density = 9;
+    optional int32 video_codec_type = 10; // MediaCodecType
+    optional UiConfig ui_config = 11;
+}
+
+// [xxw]
+message MediaSinkService {
+    optional int32 codec_type = 1;          // MediaCodecType
+    optional int32 audio_type = 2;          // AudioStreamType
+    repeated AudioConfig audio_configs = 3;
+    repeated VideoConfig video_configs = 4;
+    optional uint32 display_id = 6;
+    optional int32 display_type = 7;        // 0 main, 1 cluster, 2 aux
+}
+
+// [xxc]
+message TouchScreenConfig {
+    optional int32 width = 1;  // required
+    optional int32 height = 2; // required
+    optional int32 type = 3;
+}
+
+// [xxd]
+message InputSourceService {
+    repeated int32 keycodes_supported = 1 [packed = true];
+    repeated TouchScreenConfig touchscreen = 2;
+    repeated TouchScreenConfig touchpad = 3;
+    optional uint32 display_id = 5;
+}
+
+// [ybh]
+message SensorEntry {
+    optional int32 sensor_type = 1; // required, SensorType
+}
+
+// [ybi]
+message SensorSourceService {
+    repeated SensorEntry sensors = 1;
+}
+
+// [xxx]
+message MediaSourceService {
+    optional int32 codec_type = 1;
+    optional AudioConfig audio_config = 2;
+}
+
+// [ybk]
+message Service {
+    optional int32 id = 1; // required; also the channel number
+    optional SensorSourceService sensor_source_service = 2;
+    optional MediaSinkService media_sink_service = 3;
+    optional InputSourceService input_source_service = 4;
+    optional MediaSourceService media_source_service = 5;
+    optional NavigationStatusService navigation_status_service = 8;
+    // 6 bluetooth, 7 radio, 9 media playback status, 10 phone status,
+    // 11 media browser, 12 vendor extension, 13 notification,
+    // 14 wifi projection: not used yet.
+}
+
+// [ybm] HU -> phone
+message ServiceDiscoveryResponse {
+    repeated Service services = 1;
+    optional string make = 2;
+    optional string model = 3;
+    optional string year = 4;
+    optional string vehicle_id = 5;
+    optional int32 driver_position = 6;
+    optional string head_unit_make = 7;
+    optional string head_unit_model = 8;
+    optional string head_unit_software_build = 9;
+    optional string head_unit_software_version = 10;
+}
+
+// [xvx] phone -> HU on the service's channel, CONTROL flag set
+message ChannelOpenRequest {
+    optional sint32 priority = 1;  // required
+    optional int32 service_id = 2; // required
+}
+
+// [xvy]
+message ChannelOpenResponse {
+    optional int32 status = 1; // required
+}
+
+// [xzn]
+message PingRequest {
+    optional int64 timestamp = 1; // required
+    optional bool bug_report = 2;
+    optional bytes data = 3;
+}
+
+// [xzo]
+message PingResponse {
+    optional int64 timestamp = 1; // required
+    optional bytes data = 2;
+}
+
+// [xvd]
+message ByeByeRequest {
+    optional int32 reason = 1; // required
+}
+
+message ByeByeResponse {
+}
+
+// [xup] phone -> HU
+message AudioFocusRequest {
+    optional int32 request = 1; // required, AudioFocusRequestType
+}
+
+// [xuo] HU -> phone
+message AudioFocusNotification {
+    optional int32 state = 1; // required, AudioFocusState
+    optional bool unsolicited = 2;
+}
+
+// -------------------------------------------------------------- media channel
+
+// [ybq]
+message MediaSetup {
+    optional int32 type = 1; // required, MediaCodecType
+}
+
+// [xwb] HU -> phone
+message MediaConfig {
+    optional int32 status = 1; // required
+    optional uint32 max_unacked = 2;
+    repeated uint32 configuration_indices = 3;
+}
+
+// [ybs] phone -> HU
+message MediaStart {
+    optional int32 session_id = 1;           // required
+    optional uint32 configuration_index = 2; // required
+}
+
+message MediaStop {
+}
+
+// [xui] HU -> phone (sinks), phone -> HU (microphone)
+message MediaAck {
+    optional int32 session_id = 1; // required
+    optional uint32 ack = 2;
+    repeated uint64 receive_timestamp_ns = 3;
+}
+
+// [ycr] phone -> HU
+message VideoFocusRequest {
+    optional int32 mode = 2;   // VideoFocusMode
+    optional int32 reason = 3;
+}
+
+// [ycp] HU -> phone
+message VideoFocusNotification {
+    optional int32 mode = 1; // VideoFocusMode
+    optional bool unsolicited = 2;
+}
+
+// [xya] phone -> HU
+message MicrophoneRequest {
+    optional bool open = 1; // required
+    optional bool anc_enabled = 2;
+    optional bool ec_enabled = 3;
+    optional int32 max_unacked = 4;
+}
+
+// [xyb] HU -> phone
+message MicrophoneResponse {
+    optional int32 status = 1; // required
+    optional int32 session_id = 2;
+}
+
+// -------------------------------------------------------------- input channel
+
+// [ybw]
+message Pointer {
+    optional uint32 x = 1;  // required
+    optional uint32 y = 2;  // required
+    optional uint32 id = 3; // required
+}
+
+// [ybx]
+message TouchEvent {
+    repeated Pointer pointers = 1;
+    optional uint32 action_index = 2;
+    optional int32 action = 3; // TouchAction
+}
+
+// [xxl]
+message Key {
+    optional uint32 keycode = 1;  // required, Android KEYCODE_*
+    optional bool down = 2;       // required
+    optional uint32 metastate = 3; // required
+    optional bool longpress = 4;
+}
+
+// [xxm]
+message KeyEvent {
+    repeated Key keys = 1;
+}
+
+// [xxa] HU -> phone
+message InputReport {
+    optional uint64 timestamp = 1; // required
+    optional TouchEvent touch_event = 3;
+    optional KeyEvent key_event = 4;
+    optional TouchEvent touchpad_event = 7;
+}
+
+// [xxi] phone -> HU
+message KeyBindingRequest {
+    repeated int32 keycodes = 1 [packed = true];
+}
+
+// [xxj]
+message KeyBindingResponse {
+    optional int32 status = 1; // required
+}
+
+// ------------------------------------------------------------- sensor channel
+
+// [ybf] phone -> HU
+message SensorRequest {
+    optional int32 type = 1;              // required, SensorType
+    optional int64 min_update_period = 2; // required
+}
+
+// [ybg]
+message SensorResponse {
+    optional int32 status = 1; // required
+}
+
+// [xza]
+message NightModeData {
+    optional bool night_mode = 1;
+}
+
+// [xwm]
+message DrivingStatusData {
+    optional int32 status = 1; // bitmask, 0 = unrestricted
+}
+
+// [ybc] HU -> phone; field number == sensor type
+message SensorBatch {
+    repeated NightModeData night_mode = 10;
+    repeated DrivingStatusData driving_status = 13;
+}
+
+// -------------------------------------------- navigation status (cluster TBT)
+// Advertised by the head unit; carries the cluster's rate limit and type.
+message NavigationStatusService {
+    optional int32 minimum_interval_ms = 1;
+    optional int32 type = 2;                 // InstrumentClusterType: IMAGE=1, ENUM=2
+    message ImageOptions {
+        optional int32 height = 1;
+        optional int32 width = 2;
+        optional int32 colour_depth_bits = 3;
+    }
+    optional ImageOptions image_options = 3;
+}
+
+// phone -> HU, NAV_STATUS (0x8003). status: UNAVAILABLE=0 ACTIVE=1 INACTIVE=2 REROUTING=3
+message NavigationStatus {
+    optional int32 status = 1;
+}
+
+message NavigationRoad { optional string name = 1; }
+message NavigationCue { repeated string alternate_text = 1; }
+message NavigationDestination { optional string address = 1; }
+
+// type: NavigationType 0..42 (== Car App Library Maneuver.TYPE_*); e.g.
+// DEPART=1 KEEP_LEFT=3 KEEP_RIGHT=4 TURN_SLIGHT_LEFT=5 TURN_SLIGHT_RIGHT=6
+// TURN_NORMAL_LEFT=7 TURN_NORMAL_RIGHT=8 TURN_SHARP_LEFT=9 TURN_SHARP_RIGHT=10
+// U_TURN_LEFT=11 U_TURN_RIGHT=12 ROUNDABOUT_ENTER=30 ROUNDABOUT_EXIT=31
+// STRAIGHT=36 DESTINATION=39 DESTINATION_LEFT=41 DESTINATION_RIGHT=42
+message NavigationManeuver {
+    optional int32 type = 1;
+    optional int32 roundabout_exit_number = 2;
+    optional int32 roundabout_exit_angle = 3;
+}
+
+message NavigationStep {
+    optional NavigationManeuver maneuver = 1;
+    optional NavigationRoad road = 2;
+    optional NavigationCue cue = 4;
+}
+
+// phone -> HU, NAV_STATE (0x8006)
+message NavigationState {
+    repeated NavigationStep steps = 1;             // first up to 3 steps
+    repeated NavigationDestination destinations = 2;
+}
+
+// value + unit. units: METERS=1 KILOMETERS=2 KILOMETERS_P1=3 MILES=4 MILES_P1=5 FEET=6 YARDS=7
+message NavigationDistance {
+    optional int32 meters = 1;
+    optional string display_value = 2;
+    optional int32 display_units = 3;
+}
+
+message NavigationStepDistance {
+    optional NavigationDistance distance = 1;
+    optional int64 time_to_step_seconds = 2;
+}
+
+message NavigationDestinationDistance {
+    optional NavigationDistance distance = 1;
+    optional string estimated_time_at_arrival = 2;
+    optional int64 time_to_arrival_seconds = 3;
+}
+
+// phone -> HU, NAV_CURRENT_POSITION (0x8007)
+message NavigationCurrentPosition {
+    optional NavigationStepDistance step_distance = 1;
+    repeated NavigationDestinationDistance destination_distances = 2;
+    optional NavigationRoad current_road = 3;
+}
+
+// DEPRECATED legacy pair (still sent for older head units).
+// phone -> HU, NAV_TURN_EVENT (0x8004). turn_side: LEFT=1 RIGHT=2 UNSPECIFIED=3.
+// event (NextTurnEnum): DEPART=1 SLIGHT_TURN=3 TURN=4 SHARP_TURN=5 U_TURN=6
+// ON_RAMP=7 OFF_RAMP=8 FORK=9 MERGE=10 ROUNDABOUT_ENTER=11 ROUNDABOUT_EXIT=12
+// STRAIGHT=14 DESTINATION=19
+message NavigationNextTurnEvent {
+    optional string road = 1;
+    optional int32 turn_side = 2;
+    optional int32 event = 3;
+    optional bytes image = 4;
+    optional int32 turn_number = 5;
+    optional int32 turn_angle = 6;
+}
+
+// phone -> HU, NAV_DISTANCE_EVENT (0x8005)
+message NavigationNextTurnDistanceEvent {
+    optional int32 distance_meters = 1;
+    optional int32 time_to_turn_seconds = 2;
+    optional int32 display_distance_e3 = 3;   // display number * 1000
+    optional int32 display_distance_unit = 4; // same units as NavigationDistance
+}

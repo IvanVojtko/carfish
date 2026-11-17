@@ -1,0 +1,19 @@
+# Wired Android Auto (Android Open Accessory).
+#
+# When the car (the USB host) switches the phone into AOA mode, the kernel's
+# f_accessory driver creates /dev/usb_accessory. On this device that happens
+# automatically -- no gadget reconfiguration needed. The stock rule
+#   /lib/udev/rules.d/999-android-system.rules
+#     KERNEL=="usb_accessory", MODE="0660", GROUP="usb", OWNER="root"
+# makes the node root:usb 0660, which the Carfish app (an ordinary
+# user process, not in the "usb" group) cannot open ("Permission denied").
+#
+# This file MUST sort AFTER 999-android-system.rules so our MODE assignment
+# wins (udev applies rules in lexical order; the later MODE= takes effect).
+# "999-carfish" > "999-android", so this runs last.
+SUBSYSTEM=="misc", KERNEL=="usb_accessory", MODE="0666", TAG+="uaccess"
+
+# NOTE: some head units/phones do NOT auto-switch the gadget into accessory
+# mode. For those, config/aoa-gadget.sh can build the accessory gadget by hand
+# on the ACCESSORY=START uevent. It is left out of the default rule set because
+# on auto-switching devices running it would tear down a working connection.
