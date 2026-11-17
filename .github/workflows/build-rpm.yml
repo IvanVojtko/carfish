@@ -42,24 +42,16 @@ jobs:
             -e ARCH="${{ matrix.arch }}" \
             "coderus/sailfishos-platform-sdk:${SFOS_RELEASE}" \
             /bin/bash -c '
-              set -x
-              echo "::group::environment"
-              id; mb2 --version 2>&1 | head -3
-              echo "--- sb2 targets ---"; sb2-config -l 2>&1 || true
-              sdk-assistant list 2>&1 || true
-              ls -la ~/.scratchbox2/ 2>&1 || true
-              echo "::endgroup::"
-              mkdir -p /tmp/build && cd /tmp/build
-              cp -r /workspace/app/* .
-              ls -la rpm/
-              mb2 -t "SailfishOS-${SFOS_RELEASE}-${ARCH}" build
-              rc=$?
-              echo "::group::post-build diagnostics (rc=$rc)"
-              echo "--- .mb2 tree ---"; ls -laR .mb2 2>&1 | head -60
-              echo "--- .mb2/spec (first 10 lines) ---"; head -10 .mb2/spec 2>&1
-              echo "--- RPMS ---"; ls -la RPMS 2>&1
-              echo "::endgroup::"
-              if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+              set -ex
+              # Shadow-build, exactly like "sfdk build ../app" does locally: mb2
+              # runs "rpmbuild --build-in-place" and needs the source tree passed
+              # as an argument so it builds out-of-source and finds rpm/carfish.spec
+              # itself. A bare in-place "mb2 build" on a flat copy has no proper
+              # source setup and fails. Copy app/ outside the checked-out git
+              # worktree first so mb2 does not attempt VCS patch handling.
+              cp -r /workspace/app /tmp/src
+              mkdir -p /tmp/shadow && cd /tmp/shadow
+              mb2 -t "SailfishOS-${SFOS_RELEASE}-${ARCH}" build /tmp/src
               mkdir -p /workspace/RPMS
               cp -rv RPMS/*.rpm /workspace/RPMS/
             '
