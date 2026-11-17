@@ -38,13 +38,22 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/RPMS"
           docker run --rm --privileged \
             -v "$GITHUB_WORKSPACE:/workspace" \
+            -e SFOS_RELEASE \
+            -e ARCH="${{ matrix.arch }}" \
             "coderus/sailfishos-platform-sdk:${SFOS_RELEASE}" \
             /bin/bash -c '
               set -ex
+              # Build out-of-tree so we do not touch the mounted workspace.
+              # The project root is app/ (its rpm/carfish.spec is the package).
               mkdir -p /tmp/build && cd /tmp/build
-              # The project root is app/ (its rpm/carfish.spec is what mb2 builds).
               cp -r /workspace/app/* .
-              mb2 -t SailfishOS-'"${SFOS_RELEASE}"'-'"${{ matrix.arch }}"' build
+              ls -la rpm/
+              # Point mb2 at the spec explicitly. A bare "mb2 build" relies on
+              # auto-detecting the package dir from a project/.pro, which a CMake
+              # project run from a plain copy does not provide, so it fails with
+              # "Unable to open .mb2/spec". -s sets the spec directly.
+              mb2 -t "SailfishOS-${SFOS_RELEASE}-${ARCH}" -s rpm/carfish.spec build
+              mkdir -p /workspace/RPMS
               cp -rv RPMS/*.rpm /workspace/RPMS/
             '
 
