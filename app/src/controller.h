@@ -92,6 +92,7 @@ private:
     void startSession(Transport *transport);
     void endSession(const QString &reason);
     void launchBackendApps();
+    void migrateLegacySettings();          // carry pre-rename ("sailfishauto") settings over
     void savePreviewFrame(const QImage &rgba); // write the preview PNG (throttled)
     void checkAutoStart();                 // poll for a connected car
     bool usbCarConnected() const;          // AOA gadget actively configured by a head unit

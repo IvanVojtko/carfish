@@ -23,6 +23,7 @@
 #include <QLoggingCategory>
 #include <QQmlEngine>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QTextStream>
 
 Q_LOGGING_CATEGORY(lcCtl, "aap.controller")
@@ -57,6 +58,9 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
     // Let the car QML drop diagnostics into the durable log (carScreen.log(...)).
     connect(m_screen, &CarScreen::logMessage, this, &Controller::appendLog);
     connect(m_phone, &PhoneManager::log, this, &Controller::appendLog);
+    // Carry settings over from before the rename so an upgrade keeps the user's
+    // cert/key paths and chosen media app (the Spotify auto-launch).
+    migrateLegacySettings();
     m_mode = m_settings.value(QStringLiteral("mode"), int(Wireless)).toInt();
     m_state = tr("Idle");
     refreshCertStatus();
@@ -71,6 +75,29 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
 Controller::~Controller()
 {
     stop();
+}
+
+// Copy any settings from the pre-rename store ("sailfishauto") that the new
+// store ("carfish") does not already have. Without this an upgrade silently
+// drops the user's configured cert/key paths and media app (so Spotify no
+// longer auto-launches and the car cert check fails). Runs once: after the
+// first copy the new store has the keys, so legacy values are never re-applied
+// over later edits.
+void Controller::migrateLegacySettings()
+{
+    QSettings legacy(QStringLiteral("sailfishauto"), QStringLiteral("sailfishauto"));
+    const QStringList keys = legacy.allKeys();
+    int copied = 0;
+    for (const QString &k : keys) {
+        if (!m_settings.contains(k)) {
+            m_settings.setValue(k, legacy.value(k));
+            ++copied;
+        }
+    }
+    if (copied) {
+        m_settings.sync();
+        appendLog(tr("migrated %1 setting(s) from the previous version").arg(copied));
+    }
 }
 
 QString Controller::certPath() const

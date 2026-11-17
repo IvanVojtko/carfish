@@ -46,6 +46,21 @@ static int activeSinkIndex()
     return -1;
 }
 
+// Index of a source by name, from `pactl list short sources` (-1 if not found).
+// Used to tell whether our capture is already on the wanted monitor, so a
+// routine re-assert does not needlessly re-route the stream.
+static int sourceIndexByName(const QString &name)
+{
+    if (name.isEmpty())
+        return -1;
+    for (const QString &l : pactl({QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sources")})) {
+        const QStringList c = l.split(QLatin1Char('\t'));
+        if (c.size() >= 2 && c.at(1).trimmed() == name)
+            return c.at(0).trimmed().toInt();
+    }
+    return -1;
+}
+
 // name/state lookups from `pactl list short sinks` (tab-separated:
 // index, name, module, sample-spec, state).
 static QString sinkField(int wantIndex, const QString &wantRunning)
@@ -99,9 +114,10 @@ static QString resolveDefaultMonitor()
 AudioSource::AudioSource(QObject *parent)
     : QObject(parent)
 {
-    // Follow the actively-playing sink: the user frequently starts the music a
-    // few seconds AFTER the car session is up, when nothing is playing yet.
-    m_watch.setInterval(1500);
+    // Maintain the capture routing for the whole session: the user frequently
+    // starts the music well AFTER the car session is up, and droid keeps trying
+    // to park the record stream on the microphone, so we re-assert periodically.
+    m_watch.setInterval(2000);
     connect(&m_watch, &QTimer::timeout, this, &AudioSource::followActiveSink);
 }
 
@@ -182,54 +198,66 @@ void AudioSource::moveCaptureToMonitor()
 {
     if (!m_pipeline || m_device.isEmpty())
         return;
-    int idx = -1, moved = 0;
+    const int target = sourceIndexByName(m_device);
+    int idx = -1, curSource = -1, moved = 0;
+    bool found = false;
     for (const QString &raw : pactl({QStringLiteral("list"), QStringLiteral("source-outputs")})) {
         const QString l = raw.trimmed();
-        if (l.startsWith(QLatin1String("Source Output #")))
+        if (l.startsWith(QLatin1String("Source Output #"))) {
             idx = l.midRef(15).toInt();
-        else if (idx >= 0 && l.startsWith(QLatin1String("application.name = "))
-                 && l.contains(QLatin1String(kClientName))) {
-            QProcess::execute(QStringLiteral("pactl"),
-                              {QStringLiteral("move-source-output"), QString::number(idx), m_device});
-            ++moved;
+            curSource = -1;
+        } else if (idx >= 0 && l.startsWith(QLatin1String("Source:"))) {
+            curSource = l.midRef(7).trimmed().toInt();
+        } else if (idx >= 0 && l.startsWith(QLatin1String("application.name = "))
+                   && l.contains(QLatin1String(kClientName))) {
+            found = true;
+            // Only move when it is not already on the target monitor: a routine
+            // re-assert of an already-correct stream would needlessly re-route it
+            // (and could glitch the audio). When the monitor's index is unknown,
+            // move anyway to be safe.
+            if (target < 0 || curSource != target) {
+                QProcess::execute(QStringLiteral("pactl"),
+                                  {QStringLiteral("move-source-output"), QString::number(idx), m_device});
+                ++moved;
+            }
         }
     }
     if (moved) {
         qCInfo(lcAudio) << "forced capture onto" << m_device;
         emit captureChanged(m_device);
-    } else {
+    } else if (!found) {
         qCWarning(lcAudio) << "capture stream not found to move onto" << m_device;
     }
 }
 
-// Re-check which sink is playing and move capture onto it. We only ever switch
-// TO an actively-playing sink, so once music starts on (say) deep_buffer we lock
-// onto it and stay there; an empty result (nothing playing) leaves the current
-// pick untouched instead of snapping back to a silent sink.
+// Keep the capture correctly routed for the whole session. Runs on the watch
+// timer and does two cheap things:
+//   * if a *different* sink is actually playing (e.g. a native app on
+//     primary_output rather than Android on deep_buffer), switch the pipeline
+//     once to follow it; and
+//   * otherwise re-assert the capture onto the current monitor.
+// The re-assert is the important part: droid re-parks record streams on the
+// microphone over time and across the sink's suspend/resume — notably when the
+// user starts the music minutes after the session is already up — so without it
+// the car gets silence (or the mic) even though the pipeline looks fine. The
+// re-assert only moves the stream when it has actually drifted, so it never
+// rebuilds the pipeline and never causes the choppiness a rebuild would.
 void AudioSource::followActiveSink()
 {
     if (!m_pipeline || !m_followDefault)
         return;
     const QString want = resolveActiveMonitor();
-    if (want.isEmpty())
-        return; // nothing is actually playing yet — keep the default and wait
-    if (want == m_device) {
-        // We are already capturing the sink that's playing: lock on and stop
-        // re-resolving, so we never rebuild the pipeline again (rebuilds mid-
-        // stream are what made the audio choppy).
-        m_watch.stop();
+    if (!want.isEmpty() && want != m_device) {
+        QString error;
+        const QString was = m_device;
+        if (buildPipeline(want, &error)) // reschedules the move onto the new monitor
+            qCInfo(lcAudio) << "followed active sink" << was << "->" << m_device;
+        else
+            qCWarning(lcAudio) << "could not follow active sink to" << want << ":" << error;
         return;
     }
-    // Something is playing on a different sink: switch once, then lock on.
-    QString error;
-    const QString was = m_device;
-    if (buildPipeline(want, &error)) { // reschedules the move onto the new monitor
-        qCInfo(lcAudio) << "followed active sink" << was << "->" << m_device;
-        emit captureChanged(m_device);
-    } else {
-        qCWarning(lcAudio) << "could not follow active sink to" << want << ":" << error;
-    }
-    m_watch.stop(); // locked on — no more rebuilds
+    // Same sink, or nothing new playing yet: hold the capture on the monitor.
+    moveCaptureToMonitor();
 }
 
 void AudioSource::stop()
