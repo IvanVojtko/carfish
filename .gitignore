@@ -42,7 +42,10 @@ secrets/
 # ======================================================================
 # BUILD OUTPUT
 # ======================================================================
-build/
+# Root-anchored so it does not swallow vendored source dirs named "build"
+# (e.g. app/thirdparty/openh264/build/*.mk). The real CMake output dirs are
+# build-*/ below.
+/build/
 build-*/
 *-build/
 RPMS/
@@ -52,12 +55,14 @@ SRPMS/
 *.tar.gz
 *.tar.xz
 
-# CMake
+# CMake. "Makefile" is root-anchored so it does not exclude the vendored
+# openh264 source Makefile (app/thirdparty/openh264/Makefile); CMake-generated
+# Makefiles only appear under the build-*/ dirs, which are ignored above.
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 CTestTestfile.cmake
-Makefile
+/Makefile
 *.cmake.stamp
 compile_commands.json
 
