@@ -8,6 +8,9 @@
 #include <QVariantList>
 
 class QDBusInterface;
+#ifndef CARFISH_DESKTOP
+namespace CommHistory { class CallModel; }
+#endif
 
 // Phone/dialer backend for the car UI. Provides the address book (contacts),
 // the recent-call log, and live call control, and exposes them to CarMain as
@@ -77,6 +80,11 @@ private slots:
     void onVoiceCallsChanged();
     void onCallStatusChanged();
     void onCallDurationChanged();
+#ifndef CARFISH_DESKTOP
+    // Rebuild m_recents from the live CallModel; also fires when the contact
+    // resolver fills in names asynchronously, so recents gain names on their own.
+    void rebuildRecents();
+#endif
 
 private:
     struct Entry {
@@ -86,6 +94,7 @@ private:
     };
 
     void loadContacts();          // fill m_all + m_nameByNumber
+    void loadContactsFromHelper(); // root-helper fallback when QtContacts is blocked
     void loadRecents();           // fill m_recents
     void rebuildContactView();    // apply m_query -> m_contacts
 
@@ -100,6 +109,9 @@ private:
     QVariantList m_contacts;            // filtered view handed to QML
     QVariantList m_recents;
 
+#ifndef CARFISH_DESKTOP
+    CommHistory::CallModel *m_callModel = nullptr; // live recent-call log (kept alive)
+#endif
     QDBusInterface *m_mgr = nullptr;    // org.nemomobile.voicecall "/"
     QDBusInterface *m_call = nullptr;   // the active handler, if any
     QString m_callPath;

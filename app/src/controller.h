@@ -17,6 +17,7 @@ class PhoneManager;
 class QQmlEngine;
 class QQmlNetworkAccessManagerFactory;
 class Transport;
+class UsbHelperClient;
 class WirelessSetup;
 namespace aap { class Session; }
 
@@ -35,6 +36,8 @@ class Controller : public QObject
     Q_PROPERTY(QString navApp READ navApp WRITE setNavApp NOTIFY navAppChanged)
     Q_PROPERTY(QString mediaApp READ mediaApp WRITE setMediaApp NOTIFY mediaAppChanged)
     Q_PROPERTY(bool autoStart READ autoStart WRITE setAutoStart NOTIFY autoStartChanged)
+    Q_PROPERTY(QString trafficKey READ trafficKey WRITE setTrafficKey NOTIFY trafficKeyChanged)
+    Q_PROPERTY(bool trafficEnabled READ trafficEnabled WRITE setTrafficEnabled NOTIFY trafficEnabledChanged)
 public:
     enum Mode { Wireless = 0, Usb = 1, TcpServer = 2 };
     Q_ENUM(Mode)
@@ -59,6 +62,10 @@ public:
     void setMediaApp(const QString &id);
     bool autoStart() const;
     void setAutoStart(bool on);
+    QString trafficKey() const;
+    void setTrafficKey(const QString &key);
+    bool trafficEnabled() const;
+    void setTrafficEnabled(bool on);
 
     void setCarQml(const QUrl &url) { m_carQml = url; }
 
@@ -85,6 +92,8 @@ signals:
     void navAppChanged();
     void mediaAppChanged();
     void autoStartChanged();
+    void trafficKeyChanged();
+    void trafficEnabledChanged();
 
 private:
     void setState(const QString &state);
@@ -112,6 +121,7 @@ private:
     CarScreen *m_screen;
     QQmlNetworkAccessManagerFactory *m_namFactory = nullptr; // sets the OSM User-Agent
     WirelessSetup *m_wireless = nullptr;
+    UsbHelperClient *m_usbHelper = nullptr; // wired AA: privileged gadget switch
     QPointer<Transport> m_transport;
     QPointer<aap::Session> m_session;
 

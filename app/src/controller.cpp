@@ -6,7 +6,8 @@
 #include "apps/phonemanager.h"
 #include "media/carscreen.h"
 #include "transport/tcptransport.h"
-#include "transport/usbaccessorytransport.h"
+#include "transport/usbffstransport.h"
+#include "transport/usbhelperclient.h"
 #include "util/credentials.h"
 #include "util/uanetwork.h"
 #include "wireless/bluezprofile.h"
@@ -58,6 +59,14 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
     // Let the car QML drop diagnostics into the durable log (carScreen.log(...)).
     connect(m_screen, &CarScreen::logMessage, this, &Controller::appendLog);
     connect(m_phone, &PhoneManager::log, this, &Controller::appendLog);
+    // Push the saved TomTom traffic key + toggle to the car map, and persist the
+    // toggle when it is flipped from the on-map button.
+    m_screen->setTrafficKey(trafficKey());
+    m_screen->setTrafficEnabled(trafficEnabled());
+    connect(m_screen, &CarScreen::trafficEnabledChanged, this, [this] {
+        if (m_screen->trafficEnabled() != trafficEnabled())
+            setTrafficEnabled(m_screen->trafficEnabled());
+    });
     // Carry settings over from before the rename so an upgrade keeps the user's
     // cert/key paths and chosen media app (the Spotify auto-launch).
     migrateLegacySettings();
@@ -173,6 +182,36 @@ void Controller::setMediaApp(const QString &id)
 bool Controller::autoStart() const
 {
     return m_settings.value(QStringLiteral("autoStart"), false).toBool();
+}
+
+QString Controller::trafficKey() const
+{
+    return m_settings.value(QStringLiteral("trafficKey")).toString();
+}
+
+void Controller::setTrafficKey(const QString &key)
+{
+    if (key == trafficKey())
+        return;
+    m_settings.setValue(QStringLiteral("trafficKey"), key);
+    if (m_screen)
+        m_screen->setTrafficKey(key);
+    emit trafficKeyChanged();
+}
+
+bool Controller::trafficEnabled() const
+{
+    return m_settings.value(QStringLiteral("trafficEnabled"), true).toBool();
+}
+
+void Controller::setTrafficEnabled(bool on)
+{
+    if (on == trafficEnabled())
+        return;
+    m_settings.setValue(QStringLiteral("trafficEnabled"), on);
+    if (m_screen)
+        m_screen->setTrafficEnabled(on);
+    emit trafficEnabledChanged();
 }
 
 void Controller::setAutoStart(bool on)
@@ -345,10 +384,30 @@ void Controller::start(int mode)
         setState(tr("Waiting for paired head unit over Bluetooth"));
         break;
     }
-    case Usb:
-        setState(tr("Waiting for USB accessory"));
-        startSession(new UsbAccessoryTransport(QStringLiteral("/dev/usb_accessory"), this));
+    case Usb: {
+        // Wired AA. The car is the USB host; the privileged helper waits for
+        // the car's AOA START and rebuilds the gadget as a FunctionFS accessory
+        // (18d1:2d00), then hands us the FunctionFS mount dir to drive AAP over.
+        // The kernel's /dev/usb_accessory chardev does NOT re-enumerate on these
+        // devices, so a direct read of it gets no AAP bytes — hence the switch.
+        setState(tr("Waiting for the car (USB)"));
+        m_usbHelper = new UsbHelperClient(this);
+        connect(m_usbHelper, &UsbHelperClient::log, this, &Controller::appendLog);
+        connect(m_usbHelper, &UsbHelperClient::startRequested, this, [this](const QString &model) {
+            appendLog(tr("USB: car started Android Auto (%1)").arg(model));
+            setState(tr("Switching USB to accessory mode"));
+        });
+        connect(m_usbHelper, &UsbHelperClient::failed, this, [this](const QString &r) {
+            appendLog(tr("USB bring-up failed: %1").arg(r));
+            setState(tr("Waiting for the car (USB)"));
+        });
+        connect(m_usbHelper, &UsbHelperClient::ready, this, [this](const QString &ffsDir) {
+            appendLog(tr("USB accessory gadget ready (%1)").arg(ffsDir));
+            startSession(new UsbFfsTransport(ffsDir, this));
+        });
+        m_usbHelper->start();
         break;
+    }
     case TcpServer:
         setState(tr("Listening on port %1").arg(kHeadUnitServerPort));
         startSession(TcpTransport::server(kHeadUnitServerPort, this));
@@ -373,6 +432,29 @@ void Controller::startSession(Transport *transport)
     connect(m_session.data(), &aap::Session::logMessage, this, &Controller::appendLog);
     // Steering-wheel media buttons drive the chosen media app over MPRIS.
     connect(m_session.data(), &aap::Session::mediaKey, m_mpris, &MprisController::handleMediaKey);
+
+    // Car fuel/energy level (EV battery + range) -> the map UI, for a
+    // battery-at-arrival estimate alongside the ETA.
+    connect(m_session.data(), &aap::Session::energyStatus, m_screen,
+            [this](int pct, int rangeKm, bool electric, bool low) {
+                m_screen->setEnergy(pct, rangeKm, electric, low);
+            });
+
+    // Telephony: report call state to the head unit so an incoming/active call
+    // shows inside Android Auto (call audio stays on Bluetooth HFP), and let the
+    // head unit's answer/reject (and CALL/ENDCALL wheel buttons) drive the phone.
+    auto pushCall = [this]() {
+        if (!m_session)
+            return;
+        int state = 3; // PhoneStatus INACTIVE
+        if (m_phone->hasCall())
+            state = m_phone->incoming() ? 4 /*INCOMING*/ : 1 /*IN_CALL*/;
+        m_session->updateCall(state, m_phone->callNumber(), m_phone->callName());
+    };
+    connect(m_phone, &PhoneManager::callChanged, m_session.data(), pushCall);
+    connect(m_session.data(), &aap::Session::phoneChannelReady, m_session.data(), pushCall);
+    connect(m_session.data(), &aap::Session::phoneAnswer, m_phone, &PhoneManager::answer);
+    connect(m_session.data(), &aap::Session::phoneReject, m_phone, &PhoneManager::hangup);
     connect(m_session.data(), &aap::Session::finished, this, [this](const QString &reason) {
         appendLog(tr("Session ended: %1").arg(reason));
         if (m_mode == Wireless && m_running && m_wireless) {
@@ -450,6 +532,11 @@ void Controller::endSession(const QString &reason)
         m_wireless->stop();
         m_wireless->deleteLater();
         m_wireless = nullptr;
+    }
+    if (m_usbHelper) {
+        m_usbHelper->stop(); // restores usb-moded / the normal USB gadget
+        m_usbHelper->deleteLater();
+        m_usbHelper = nullptr;
     }
     if (m_running) {
         m_running = false;

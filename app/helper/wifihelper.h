@@ -55,8 +55,10 @@ private:
     bool m_ready = false;     // joined signalled
     int m_attempts = 0;
     int m_routeAttempts = 0;  // retries waiting for the car WiFi IPv4 to settle
+    bool m_cellularPinned = false; // last enforce result (for quiet logging)
     QTimer m_retry;
     QTimer m_routeRetry;
+    QTimer m_enforce;         // re-assert the cellular default route while on car WiFi
 };
 
 // D-Bus face of WifiHelper (interface org.carfish.Helper1).

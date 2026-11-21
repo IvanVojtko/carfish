@@ -251,6 +251,11 @@ message SensorEntry {
 // [ybi]
 message SensorSourceService {
     repeated SensorEntry sensors = 1;
+    // The car advertises its fuel types here; FUEL_TYPE_ELECTRIC (10) present
+    // means the FUEL sensor's level/range are the EV battery's state-of-charge
+    // and remaining range (there is no separate EV battery sensor over AAP).
+    repeated int32 supported_fuel_types = 3;      // FuelType
+    repeated int32 supported_ev_connector_types = 4;
 }
 
 // [xxx]
@@ -267,9 +272,53 @@ message Service {
     optional InputSourceService input_source_service = 4;
     optional MediaSourceService media_source_service = 5;
     optional NavigationStatusService navigation_status_service = 8;
-    // 6 bluetooth, 7 radio, 9 media playback status, 10 phone status,
+    optional PhoneStatusService phone_status_service = 10;
+    // 6 bluetooth, 7 radio, 9 media playback status,
     // 11 media browser, 12 vendor extension, 13 notification,
     // 14 wifi projection: not used yet.
+}
+
+// Phone/telephony status. The HU advertises this service when it can show the
+// in-car call UI; the phone then reports call state (PHONE_STATUS, ph->HU) and
+// the HU reports answer/reject taps (PHONE_STATUS_INPUT, HU->ph). The call AUDIO
+// stays on Bluetooth HFP — AAP never carries call voice.
+message PhoneStatusService {}
+
+enum PhoneStatusMessage {
+    PHONE_STATUS = 32769;        // 0x8001 phone -> HU (call list + signal)
+    PHONE_STATUS_INPUT = 32770;  // 0x8002 HU -> phone (answer/reject from the AA call UI)
+}
+
+message PhoneStatus {
+    message Call {
+        optional int32 phone_state = 1;   // State enum below
+        optional uint32 call_duration_seconds = 2;
+        optional string caller_number = 3;
+        optional string caller_id = 4;    // display name
+        optional string caller_number_type = 5;
+        optional bytes caller_thumbnail = 6;
+    }
+    repeated Call calls = 1;
+    optional uint32 signal_strength = 2;
+    enum State {
+        UNKNOWN = 0;
+        IN_CALL = 1;
+        ON_HOLD = 2;
+        INACTIVE = 3;
+        INCOMING = 4;
+        CONFERENCED = 5;
+        MUTED = 6;
+    }
+}
+
+message InstrumentClusterInput {
+    optional int32 action = 1; // UNKNOWN 0, UP 1, DOWN 2, LEFT 3, RIGHT 4, ENTER 5, BACK 6, CALL 7
+}
+
+message PhoneStatusInput {
+    optional InstrumentClusterInput input = 1;
+    optional string caller_number = 2;
+    optional string caller_id = 3;
 }
 
 // [ybm] HU -> phone
@@ -414,11 +463,38 @@ message KeyEvent {
     repeated Key keys = 1;
 }
 
+// [xxn] One relative (rotary/knob/scroll-wheel) component: a signed step delta
+// for a given knob keycode (65536 rotary, 65537 media, 65538 nav, 65540 tel...).
+// Many head units deliver steering-wheel track-skip and tuning as these rather
+// than discrete key presses, so we MUST parse field 6 or the event is invisible.
+message Rel {
+    optional uint32 keycode = 1;
+    optional int32 delta = 2;
+}
+
+// [xxo]
+message RelativeEvent {
+    repeated Rel data = 1;
+}
+
+// [xxp] An absolute-axis (e.g. jog/position) component.
+message Abs {
+    optional uint32 keycode = 1;
+    optional int32 value = 2;
+}
+
+// [xxq]
+message AbsoluteEvent {
+    repeated Abs data = 1;
+}
+
 // [xxa] HU -> phone
 message InputReport {
     optional uint64 timestamp = 1; // required
     optional TouchEvent touch_event = 3;
     optional KeyEvent key_event = 4;
+    optional AbsoluteEvent absolute_event = 5;
+    optional RelativeEvent relative_event = 6;
     optional TouchEvent touchpad_event = 7;
 }
 
@@ -455,8 +531,17 @@ message DrivingStatusData {
     optional int32 status = 1; // bitmask, 0 = unrestricted
 }
 
+// Fuel / energy level. For an electric car (supported_fuel_types has ELECTRIC)
+// fuel_level is the battery state-of-charge % and range is the remaining EV range.
+message FuelData {
+    optional int32 fuel_level = 1;        // 0-100 percent
+    optional int32 range = 2;             // remaining range, kilometres
+    optional bool low_fuel_warning = 3;
+}
+
 // [ybc] HU -> phone; field number == sensor type
 message SensorBatch {
+    repeated FuelData fuel = 6;
     repeated NightModeData night_mode = 10;
     repeated DrivingStatusData driving_status = 13;
 }

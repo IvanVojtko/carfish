@@ -10,6 +10,8 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QSet>
+#include <QStringList>
 
 #include <QLoggingCategory>
 #include <QtEndian>
@@ -360,9 +362,33 @@ void Session::onServiceDiscovery(const QByteArray &body)
             const InputSourceService &in = svc.input_source_service();
             if (in.touchscreen_size() > 0)
                 info.touchSize = QSize(in.touchscreen(0).width(), in.touchscreen(0).height());
+            // The head unit advertises which hardware/steering-wheel keycodes it
+            // can send. We must bind exactly these for it to forward them (some
+            // cars, e.g. Ford SYNC, use non-obvious codes), so remember them.
+            QStringList codes;
+            for (int i = 0; i < in.keycodes_supported_size(); ++i) {
+                info.huKeycodes.append(in.keycodes_supported(i));
+                codes << QString::number(in.keycodes_supported(i));
+            }
+            if (!info.huKeycodes.isEmpty())
+                log(tr("head unit input keycodes: %1").arg(codes.join(QLatin1Char(' '))));
             m_channels.insert(ch, info);
         } else if (svc.has_sensor_source_service()) {
             m_channels.insert(ch, ChannelInfo{Kind::Sensor});
+            // Remember which sensors the car offers, so we can ask for the useful
+            // ones (e.g. FUEL/energy) and know what's even possible on this car.
+            const SensorSourceService &ss = svc.sensor_source_service();
+            QStringList types;
+            for (int i = 0; i < ss.sensors_size(); ++i) {
+                m_sensorsAvailable.insert(ss.sensors(i).sensor_type());
+                types << QString::number(ss.sensors(i).sensor_type());
+            }
+            for (int i = 0; i < ss.supported_fuel_types_size(); ++i)
+                if (ss.supported_fuel_types(i) == 10) // FUEL_TYPE_ELECTRIC
+                    m_evCar = true;
+            log(tr("head unit sensors: %1%2")
+                    .arg(types.isEmpty() ? tr("(none)") : types.join(QLatin1Char(' ')),
+                         m_evCar ? tr(" [electric car]") : QString()));
         } else if (svc.has_media_source_service() && m_micChannel < 0) {
             // The car's microphone is advertised as a MediaSource. We open it on
             // demand (e.g. a steering-wheel voice button), not at startup.
@@ -387,6 +413,11 @@ void Session::onServiceDiscovery(const QByteArray &body)
             if (nav.has_minimum_interval_ms() && nav.minimum_interval_ms() > 0)
                 m_navMinIntervalMs = nav.minimum_interval_ms();
             log(tr("instrument cluster navigation available (min interval %1 ms)").arg(m_navMinIntervalMs));
+        } else if (svc.has_phone_status_service() && m_phoneStatusChannel < 0) {
+            // The HU can show the in-AA call screen. Open the channel; we then
+            // push call state (PhoneStatus) onto it and receive answer/reject.
+            m_channels.insert(ch, ChannelInfo{Kind::PhoneStatus});
+            log(tr("head unit can show calls in Android Auto (phone-status service)"));
         }
     }
 
@@ -441,8 +472,17 @@ void Session::onChannel(ChannelInfo &ch, quint8 channel, const Message &msg)
     case Kind::Input:
         if (id == INPUT_REPORT)
             onInput(ch, body);
-        else if (id == INPUT_KEY_BINDING_RESPONSE)
-            log(tr("key binding acknowledged"));
+        else if (id == INPUT_KEY_BINDING_RESPONSE) {
+            KeyBindingResponse resp;
+            parse(resp, body);
+            // 0 = OK; -18 = KEYCODE_NOT_BOUND, -20 = INVALID_INPUT. A non-zero
+            // status means the HU rejected (some of) our keycodes and may forward
+            // nothing — worth seeing in the log rather than assuming success.
+            if (resp.has_status() && resp.status() != 0)
+                log(tr("key binding REJECTED by head unit (status %1)").arg(resp.status()));
+            else
+                log(tr("key binding acknowledged"));
+        }
         break;
     case Kind::Sensor:
         if (id == SENSOR_BATCH)
@@ -474,7 +514,53 @@ void Session::onChannel(ChannelInfo &ch, quint8 channel, const Message &msg)
             qCInfo(lcAap) << "unhandled nav message" << hex << id;
         }
         break;
+    case Kind::PhoneStatus:
+        if (id == PHONE_STATUS_INPUT)
+            onPhoneStatusInput(body);
+        else
+            qCInfo(lcAap) << "unhandled phone-status message" << hex << id;
+        break;
     }
+}
+
+// The head unit's in-AA call UI sends an answer/reject tap here. CALL(7) answers
+// an incoming call (or ends the active one); BACK(6)/ENTER on an incoming call is
+// treated as reject. Call audio stays on Bluetooth HFP; we only drive telephony.
+void Session::onPhoneStatusInput(const QByteArray &body)
+{
+    PhoneStatusInput in;
+    if (!parse(in, body))
+        return;
+    const int action = in.has_input() ? in.input().action() : 0;
+    log(tr("phone-status input: action %1").arg(action));
+    switch (action) {
+    case 7: // CALL -> answer (or toggle)
+        emit phoneAnswer();
+        break;
+    case 6: // BACK -> reject / hang up
+        emit phoneReject();
+        break;
+    default:
+        break;
+    }
+}
+
+void Session::updateCall(int state, const QString &number, const QString &name)
+{
+    if (m_phoneStatusChannel < 0)
+        return; // the HU did not advertise/open a phone-status channel
+    PhoneStatus status;
+    // State 3 == INACTIVE: report an empty call list to clear the HU's call UI.
+    if (state != PhoneStatus::INACTIVE && state != PhoneStatus::UNKNOWN) {
+        PhoneStatus::Call *c = status.add_calls();
+        c->set_phone_state(state);
+        if (!number.isEmpty())
+            c->set_caller_number(number.toStdString());
+        if (!name.isEmpty())
+            c->set_caller_id(name.toStdString());
+    }
+    send(quint8(m_phoneStatusChannel), PHONE_STATUS, status.SerializeAsString());
+    log(tr("phone status -> HU: state %1 %2").arg(state).arg(name.isEmpty() ? number : name));
 }
 
 void Session::onChannelOpened(ChannelInfo &ch, quint8 channel)
@@ -493,26 +579,33 @@ void Session::onChannelOpened(ChannelInfo &ch, quint8 channel)
         break;
     }
     case Kind::Input: {
-        // Bind the hardware/steering-wheel buttons we can act on, so the HU
-        // forwards them as key events (Android KEYCODE_* values).
-        static const int kKeys[] = {
-            4,   // BACK
-            3,   // HOME
-            82,  // MENU
-            19, 20, 21, 22, 23, // DPAD up/down/left/right/center
-            85, 126, 127, // MEDIA play-pause / play / pause
-            86,  // MEDIA stop
-            87, 88, // MEDIA next / previous
-            90, 89, // MEDIA fast-forward / rewind
-            79,  // MEDIA_PLAY_PAUSE (headset hook)
-            231, // VOICE_ASSIST (push-to-talk)
-            84,  // SEARCH
-            5, 6, // CALL / ENDCALL
-            65536, // rotary controller (delivered as relative)
+        // Bind the hardware/steering-wheel buttons so the HU forwards them. The HU
+        // only forwards keys we bind. The head unit advertises EXACTLY the codes it
+        // can send (keycodes_supported), so — like F-Auto, which has real-car
+        // compatibility reports — we bind exactly that advertised set. Binding more
+        // is pointless (the HU won't send unadvertised codes) and some units reject
+        // the whole request if it contains a code they don't support, forwarding
+        // nothing. Only if the HU advertised nothing do we fall back to a known set.
+        static const int kKnownKeys[] = {
+            1, 2, 3, 4, 5, 6,            // mic / menu / home / back / call / endcall
+            19, 20, 21, 22, 23,         // DPAD up/down/left/right/center
+            24, 25, 91, 164,            // volume up/down/mute, (vol) mute
+            79, 85, 86, 87, 88, 89, 90, // headset-hook, play-pause, stop, next, prev, rewind, ff
+            126, 127,                   // play / pause
+            82, 84, 219, 231,           // menu / search / assist / voice-assist
+            260, 261, 262, 263,         // navigate prev/next/in/out
+            65536, 65537, 65538, 65539, 65540, // rotary + media/navigation/radio/tel knobs
         };
         KeyBindingRequest req;
-        for (int k : kKeys)
-            req.add_keycodes(k);
+        QStringList bound;
+        if (!ch.huKeycodes.isEmpty()) {
+            for (int k : ch.huKeycodes)
+                if (k > 0) { req.add_keycodes(k); bound << QString::number(k); }
+        } else {
+            for (int k : kKnownKeys)
+                if (k > 0) { req.add_keycodes(k); bound << QString::number(k); }
+        }
+        log(tr("binding %1 input keycode(s): %2").arg(bound.size()).arg(bound.join(QLatin1Char(' '))));
         send(channel, INPUT_KEY_BINDING_REQUEST, req.SerializeAsString());
         break;
     }
@@ -521,11 +614,20 @@ void Session::onChannelOpened(ChannelInfo &ch, quint8 channel)
         log(tr("microphone channel ready"));
         break;
     case Kind::Sensor:
-        for (int type : { int(SENSOR_DRIVING_STATUS), int(SENSOR_NIGHT_MODE) }) {
-            SensorRequest req;
-            req.set_type(type);
-            req.set_min_update_period(0);
-            send(channel, SENSOR_REQUEST, req.SerializeAsString());
+        {
+            QVector<int> want{ int(SENSOR_DRIVING_STATUS), int(SENSOR_NIGHT_MODE) };
+            // Ask for the fuel/energy sensor too when advertised — this is the EV
+            // battery level + remaining range we use for battery-at-arrival.
+            if (m_sensorsAvailable.contains(int(SENSOR_FUEL))) {
+                want << int(SENSOR_FUEL);
+                log(tr("requesting the car's fuel/energy sensor"));
+            }
+            for (int type : want) {
+                SensorRequest req;
+                req.set_type(type);
+                req.set_min_update_period(0);
+                send(channel, SENSOR_REQUEST, req.SerializeAsString());
+            }
         }
         break;
     case Kind::Nav:
@@ -535,6 +637,11 @@ void Session::onChannelOpened(ChannelInfo &ch, quint8 channel)
         log(tr("instrument cluster channel ready"));
         if (m_nav && m_nav->active())
             onNavUpdated();
+        break;
+    case Kind::PhoneStatus:
+        m_phoneStatusChannel = channel;
+        log(tr("phone-status channel ready (calls will show in Android Auto)"));
+        emit phoneChannelReady();
         break;
     }
 }
@@ -873,6 +980,18 @@ void Session::onInput(const ChannelInfo &ch, const QByteArray &body)
             dispatchKey(k.keycode(), k.down(), k.longpress());
     }
 
+    // Rotary/knob/scroll-wheel steps. Many head units (and some steering wheels)
+    // deliver track-skip and tuning here instead of as discrete key presses, so
+    // this field being unparsed previously made those buttons do nothing at all.
+    if (report.has_relative_event()) {
+        for (const Rel &r : report.relative_event().data())
+            dispatchRelative(r.keycode(), r.delta());
+    }
+    if (report.has_absolute_event()) {
+        for (const Abs &a : report.absolute_event().data())
+            log(tr("HU absolute event: keycode=%1 value=%2").arg(a.keycode()).arg(a.value()));
+    }
+
     if (!report.has_touch_event())
         return;
     const TouchEvent &t = report.touch_event();
@@ -975,8 +1094,8 @@ void Session::dispatchKey(quint32 keycode, bool down, bool longpress)
     case 21:  nav = QStringLiteral("left"); break;
     case 22:  nav = QStringLiteral("right"); break;
     case 23:  nav = QStringLiteral("select"); break;
-    case 5:   nav = QStringLiteral("call"); break;
-    case 6:   nav = QStringLiteral("endcall"); break;
+    case 5:   log(tr("CALL button -> answer")); emit phoneAnswer(); return;   // KEYCODE_CALL
+    case 6:   log(tr("ENDCALL button -> reject/hang up")); emit phoneReject(); return; // KEYCODE_ENDCALL
     default:
         log(tr("unmapped key %1").arg(keycode));
         return;
@@ -995,6 +1114,19 @@ void Session::dispatchKey(quint32 keycode, bool down, bool longpress)
         log(tr("nav key: %1").arg(nav));
         emit navKey(nav);
     }
+}
+
+// A rotary/knob/scroll step from the head unit (InputReport.relative_event). We
+// log every one so a car test reveals exactly what a given control emits, then
+// map it to a track skip — the user's wheel "change song" control. One skip per
+// event (direction from the sign); magnitude is ignored so a multi-detent knob
+// can't skip a whole album at once.
+void Session::dispatchRelative(quint32 keycode, int delta)
+{
+    log(tr("HU relative event: keycode=%1 delta=%2").arg(keycode).arg(delta));
+    if (delta == 0)
+        return;
+    emit mediaKey(delta > 0 ? QStringLiteral("next") : QStringLiteral("prev"));
 }
 
 // Open or close the car microphone. On open we send MICROPHONE_REQUEST and arm
@@ -1067,6 +1199,16 @@ void Session::onSensorBatch(const QByteArray &body)
         m_screen->setNightMode(batch.night_mode(batch.night_mode_size() - 1).night_mode());
     if (batch.driving_status_size() > 0)
         log(tr("driving status %1").arg(batch.driving_status(batch.driving_status_size() - 1).status()));
+    if (batch.fuel_size() > 0) {
+        const FuelData &f = batch.fuel(batch.fuel_size() - 1);
+        const int pct = f.has_fuel_level() ? f.fuel_level() : -1;
+        const int rangeKm = f.has_range() ? f.range() : -1;
+        log(tr("car %1: %2%% , range %3 km%4")
+                .arg(m_evCar ? tr("battery") : tr("fuel"))
+                .arg(pct).arg(rangeKm)
+                .arg(f.low_fuel_warning() ? tr(" (LOW)") : QString()));
+        emit energyStatus(pct, rangeKm, m_evCar, f.low_fuel_warning());
+    }
 }
 
 } // namespace aap

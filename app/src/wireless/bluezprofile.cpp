@@ -83,9 +83,18 @@ void BluezProfile::connectDevice(const QString &devicePath)
     connect(w, &QDBusPendingCallWatcher::finished, this, [this, devicePath](QDBusPendingCallWatcher *w) {
         QDBusPendingReply<> r = *w;
         if (r.isError()) {
+            const QString msg = r.error().message();
+            emit log(QStringLiteral("ConnectProfile(%1): %2").arg(devicePath, msg));
             // "Already connected" / "In progress" are benign — the socket still
-            // arrives via NewConnection.
-            emit log(QStringLiteral("ConnectProfile(%1): %2").arg(devicePath, r.error().message()));
+            // arrives via NewConnection. Anything else (br-connection-page-timeout
+            // after the head unit reset its Bluetooth, connection refused/canceled)
+            // means the link did NOT come up and no NewConnection will arrive, so
+            // surface it as an error to drive a backoff retry instead of stalling.
+            const QString low = msg.toLower();
+            const bool benign = low.contains(QLatin1String("already connected"))
+                    || low.contains(QLatin1String("in progress"));
+            if (!benign && m_fd < 0)
+                emit error(QStringLiteral("Bluetooth connect failed: %1").arg(msg));
         } else {
             emit log(QStringLiteral("ConnectProfile(%1): ok").arg(devicePath));
         }

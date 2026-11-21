@@ -128,6 +128,34 @@ void CarScreen::setNightMode(bool night)
     emit nightModeChanged();
 }
 
+void CarScreen::setTrafficKey(const QString &key)
+{
+    if (m_trafficKey == key)
+        return;
+    m_trafficKey = key;
+    emit trafficKeyChanged();
+}
+
+void CarScreen::setTrafficEnabled(bool on)
+{
+    if (m_trafficEnabled == on)
+        return;
+    m_trafficEnabled = on;
+    emit trafficEnabledChanged();
+}
+
+void CarScreen::setEnergy(int levelPct, int rangeKm, bool electric, bool low)
+{
+    if (m_evLevel == levelPct && m_evRange == rangeKm
+            && m_evElectric == electric && m_evLow == low)
+        return;
+    m_evLevel = levelPct;
+    m_evRange = rangeKm;
+    m_evElectric = electric;
+    m_evLow = low;
+    emit energyChanged();
+}
+
 void CarScreen::setCarProperty(const QString &name, const QVariant &value)
 {
     if (m_root)

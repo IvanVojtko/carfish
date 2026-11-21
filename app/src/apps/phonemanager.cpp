@@ -2,6 +2,7 @@
 
 #include <QDBusConnection>
 #include <QDBusInterface>
+#include <QDBusReply>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
@@ -22,6 +23,8 @@
 #include <CommHistory/CallModel>
 #include <CommHistory/Event>
 #include <CommHistory/Recipient>
+
+#include <QAbstractItemModel>
 
 QTCONTACTS_USE_NAMESPACE
 #endif
@@ -355,6 +358,12 @@ void PhoneManager::loadContacts()
         }
     }
 
+    // On a device where defaultuser isn't in the 'privileged' group, QtContacts
+    // can't read the contacts DB (EACCES) and returns nothing. Fall back to the
+    // root carfish-helper, which reads it on our behalf.
+    if (m_all.isEmpty())
+        loadContactsFromHelper();
+
     std::sort(m_all.begin(), m_all.end(), [](const Entry &a, const Entry &b) {
         const int c = QString::localeAwareCompare(a.name, b.name);
         return c != 0 ? c < 0 : a.number < b.number;
@@ -362,22 +371,79 @@ void PhoneManager::loadContacts()
     qCInfo(lcPhone) << "loaded" << m_all.size() << "contact numbers";
 }
 
-void PhoneManager::loadRecents()
+// Ask carfish-helper (root) for the contacts it read from the privileged DB.
+// Each entry is "name\tnumber".
+void PhoneManager::loadContactsFromHelper()
 {
-    CommHistory::CallModel model;
-    model.setQueryMode(CommHistory::EventModel::SyncQuery);
-    model.setResolveContacts(CommHistory::EventModel::DoNotResolve);
-    model.setSorting(CommHistory::CallModel::SortByTime);
-    model.getEvents();
-
-    m_recents.clear();
-    const int n = qMin(model.rowCount(), 50);
-    for (int i = 0; i < n; ++i) {
-        const CommHistory::Event ev = model.event(i);
-        const QString number = ev.recipients().remoteUids().value(0);
+    QDBusInterface iface(QStringLiteral("org.carfish.Helper"),
+                         QStringLiteral("/org/carfish/Contacts"),
+                         QStringLiteral("org.carfish.Contacts1"),
+                         QDBusConnection::systemBus());
+    QDBusReply<QStringList> reply = iface.call(QStringLiteral("GetContacts"));
+    if (!reply.isValid()) {
+        qCWarning(lcPhone) << "contacts helper unavailable:" << reply.error().message();
+        return;
+    }
+    const QStringList entries = reply.value();
+    for (const QString &e : entries) {
+        const int tab = e.indexOf(QLatin1Char('\t'));
+        if (tab <= 0)
+            continue;
+        const QString name = e.left(tab);
+        const QString number = e.mid(tab + 1);
         if (number.isEmpty())
             continue;
-        const QString name = nameForNumber(number);
+        m_all.append(Entry{name, number, QString()});
+        m_nameByNumber.insert(normalise(number), name);
+    }
+    qCInfo(lcPhone) << "contacts via helper:" << entries.size();
+}
+
+void PhoneManager::loadRecents()
+{
+    // Keep the CallModel alive and let CommHistory resolve the caller names via
+    // the shared contact cache (SeasideCache) — the same resolver the stock
+    // dialer uses, so a name matches however the number is formatted. That
+    // resolution is asynchronous (and ResolveImmediately is incompatible with
+    // SyncQuery), so we rebuild the recents list whenever the model changes;
+    // names then appear on their own as the resolver fills them in.
+    if (!m_callModel) {
+        m_callModel = new CommHistory::CallModel(this);
+        m_callModel->setResolveContacts(CommHistory::EventModel::ResolveImmediately);
+        m_callModel->setSorting(CommHistory::CallModel::SortByTime);
+        connect(m_callModel, &QAbstractItemModel::modelReset, this, &PhoneManager::rebuildRecents);
+        connect(m_callModel, &QAbstractItemModel::dataChanged, this, &PhoneManager::rebuildRecents);
+        connect(m_callModel, &QAbstractItemModel::rowsInserted, this, &PhoneManager::rebuildRecents);
+        connect(m_callModel, &QAbstractItemModel::rowsRemoved, this, &PhoneManager::rebuildRecents);
+    }
+    if (!m_callModel->getEvents())
+        qCWarning(lcPhone) << "CallModel::getEvents() failed";
+}
+
+void PhoneManager::rebuildRecents()
+{
+    if (!m_callModel)
+        return;
+    m_recents.clear();
+    int named = 0;
+    const int n = qMin(m_callModel->rowCount(), 50);
+    for (int i = 0; i < n; ++i) {
+        const CommHistory::Event ev = m_callModel->event(i);
+        const CommHistory::Recipient r = ev.recipients().value(0);
+        QString number = r.remoteUid();
+        if (number.isEmpty())
+            number = ev.recipients().remoteUids().value(0);
+        if (number.isEmpty())
+            continue;
+        // Prefer the resolved contact name (event, then recipient), then our own
+        // contact map built from QtContacts, then fall back to the number.
+        QString name = ev.contactName();
+        if (name.isEmpty())
+            name = r.contactName();
+        if (name.isEmpty())
+            name = nameForNumber(number);
+        if (!name.isEmpty())
+            ++named;
 
         QVariantMap m;
         m[QStringLiteral("number")] = number;
@@ -389,7 +455,8 @@ void PhoneManager::loadRecents()
         m[QStringLiteral("whenText")] = whenText(ev.startTime());
         m_recents.append(m);
     }
-    qCInfo(lcPhone) << "loaded" << m_recents.size() << "recent calls";
+    qCInfo(lcPhone) << "recents:" << m_recents.size() << "calls," << named << "named";
+    emit recentsChanged();
 }
 #else  // CARFISH_DESKTOP — mock data so the car UI renders in the simulator
 void PhoneManager::loadContacts()

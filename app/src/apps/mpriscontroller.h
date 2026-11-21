@@ -4,6 +4,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QVariantList>
 
 // Watches the session bus for MPRIS media players (org.mpris.MediaPlayer2.*),
 // tracks the currently active one's metadata and playback state, and forwards
@@ -25,6 +26,11 @@ class MprisController : public QObject
     Q_PROPERTY(double position READ position NOTIFY positionChanged)
     Q_PROPERTY(double duration READ duration NOTIFY changed)
     Q_PROPERTY(double progress READ progress NOTIFY positionChanged)
+    // The current play queue / track list, when the player exposes the optional
+    // MPRIS TrackList interface (the Sailfish Android bridge does, so Spotify's
+    // queue is listable). Each entry: { id, title, artist, album, current }.
+    Q_PROPERTY(QVariantList queue READ queue NOTIFY queueChanged)
+    Q_PROPERTY(bool hasQueue READ hasQueue NOTIFY queueChanged)
 public:
     explicit MprisController(QObject *parent = nullptr);
 
@@ -37,6 +43,14 @@ public:
     double position() const { return double(m_positionUs) / 1e6; }
     double duration() const { return double(m_lengthUs) / 1e6; }
     double progress() const { return m_lengthUs > 0 ? double(m_positionUs) / double(m_lengthUs) : 0.0; }
+    QVariantList queue() const { return m_queue; }
+    bool hasQueue() const { return !m_queue.isEmpty(); }
+
+    // Fetch the current track list from the player's TrackList interface (keeps
+    // it refreshed afterwards while the list view is open).
+    Q_INVOKABLE void refreshQueue();
+    // Jump to a track by its TrackList id (the object path from refreshQueue).
+    Q_INVOKABLE void goToTrack(const QString &id);
 
     Q_INVOKABLE void playPause();
     Q_INVOKABLE void play();
@@ -54,6 +68,7 @@ public:
 signals:
     void changed();
     void positionChanged();
+    void queueChanged();
 
 private slots:
     void onPropertiesChanged(const QString &iface, const QVariantMap &changed, const QStringList &invalidated);
@@ -73,4 +88,7 @@ private:
     qint64 m_positionUs = 0;  // current position, microseconds
     qint64 m_lengthUs = 0;    // track length (mpris:length), microseconds
     QTimer m_posTimer;        // ticks Position while playing
+    QString m_trackId;        // mpris:trackid of the current track (queue highlight)
+    QVariantList m_queue;     // current TrackList entries
+    bool m_wantQueue = false; // keep the queue refreshed after the user opened it
 };

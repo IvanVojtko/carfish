@@ -1,5 +1,7 @@
 #include "audiosource.h"
 
+#include <QHash>
+#include <QList>
 #include <QLoggingCategory>
 #include <QMetaObject>
 #include <QProcess>
@@ -30,22 +32,6 @@ static QStringList pactl(const QStringList &args)
     return QString::fromUtf8(p.readAllStandardOutput()).split(QLatin1Char('\n'));
 }
 
-// The sink index feeding the first actively-playing (uncorked) stream, or -1.
-static int activeSinkIndex()
-{
-    int sink = -1;
-    for (const QString &raw : pactl({QStringLiteral("list"), QStringLiteral("sink-inputs")})) {
-        const QString l = raw.trimmed();
-        if (l.startsWith(QLatin1String("Sink Input #")))
-            sink = -1;
-        else if (l.startsWith(QLatin1String("Sink:")))
-            sink = l.midRef(5).trimmed().toInt();
-        else if (l.startsWith(QLatin1String("Corked:")) && !l.contains(QLatin1String("yes")) && sink >= 0)
-            return sink; // first uncorked input wins
-    }
-    return -1;
-}
-
 // Index of a source by name, from `pactl list short sources` (-1 if not found).
 // Used to tell whether our capture is already on the wanted monitor, so a
 // routine re-assert does not needlessly re-route the stream.
@@ -61,54 +47,31 @@ static int sourceIndexByName(const QString &name)
     return -1;
 }
 
-// name/state lookups from `pactl list short sinks` (tab-separated:
-// index, name, module, sample-spec, state).
-static QString sinkField(int wantIndex, const QString &wantRunning)
+// Our dedicated capture sink. Media ("player") streams are redirected into it
+// and we record its monitor; the phone speaker stays silent and the capture is
+// deterministic (it never drifts onto the mic the way chasing the live sink
+// did). A distinctive name lets a stale one (left by a crash) be found/reused.
+static const char kCaptureSink[] = "carfish_capture";
+
+// A real hardware sink to move streams back onto when we stop, so the phone
+// plays through its speaker again. Prefer the Android media sink, then the
+// primary output, then anything that is not a null/monitor sink.
+static QString hardwarePlaybackSink()
 {
+    QStringList names;
     for (const QString &l : pactl({QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sinks")})) {
         const QStringList c = l.split(QLatin1Char('\t'));
-        if (c.size() < 2)
-            continue;
-        const QString name = c.at(1).trimmed();
-        if (wantIndex >= 0 && c.at(0).trimmed().toInt() == wantIndex)
-            return name;
-        if (!wantRunning.isEmpty() && c.size() >= 5 && c.last().trimmed() == wantRunning
-                && !name.contains(QLatin1String("null")))
-            return name;
+        if (c.size() >= 2)
+            names << c.at(1).trimmed();
     }
-    return QString();
-}
-
-// The monitor of whatever is *actively playing*, or empty if nothing is.
-// On Sailfish, Android apps (e.g. Spotify via App Support) route to
-// sink.deep_buffer and native apps to sink.primary_output; the "default" sink is
-// often sink.null (silent), so we must NOT trust the default. Returns empty when
-// no stream is playing so the caller can keep its current pick instead of
-// snapping to a silent sink.
-static QString resolveActiveMonitor()
-{
-    const int idx = activeSinkIndex();
-    if (idx >= 0) {
-        const QString name = sinkField(idx, QString());
-        // Never follow the null sink: it is silent, and Android briefly parks
-        // streams there, which would otherwise make us flap off the real audio.
-        if (!name.isEmpty() && !name.contains(QLatin1String("null")))
-            return name + QStringLiteral(".monitor");
-    }
-    const QString running = sinkField(-1, QStringLiteral("RUNNING"));
-    if (!running.isEmpty())
-        return running + QStringLiteral(".monitor");
-    return QString();
-}
-
-// Best guess when nothing is playing yet. On this phone Android media (the
-// common case: Spotify) plays to sink.deep_buffer, whose monitor stays valid
-// across suspend/resume, so capturing it before playback starts simply yields
-// silence until the music begins — then real audio, with no reconfigure needed.
-static QString resolveDefaultMonitor()
-{
-    const QString active = resolveActiveMonitor();
-    return active.isEmpty() ? QStringLiteral("sink.deep_buffer.monitor") : active;
+    for (const QString &pref : {QStringLiteral("sink.deep_buffer"), QStringLiteral("sink.primary_output")})
+        if (names.contains(pref))
+            return pref;
+    for (const QString &n : names)
+        if (!n.isEmpty() && !n.contains(QLatin1String("null")) && !n.contains(QLatin1String(kCaptureSink))
+            && !n.endsWith(QLatin1String(".monitor")))
+            return n;
+    return QStringLiteral("sink.primary_output");
 }
 
 AudioSource::AudioSource(QObject *parent)
@@ -131,17 +94,173 @@ bool AudioSource::start(const QString &device, int sampleRate, int channels, QSt
     stop();
     m_sampleRate = sampleRate;
     m_channels = channels;
-    // Resolve the "capture what's playing" token to a concrete monitor source, so
-    // we never fall through to pulsesrc's default (the microphone). When we are
-    // following the default, keep polling so we can switch to the sink that
-    // actually starts playing after the session is already up.
-    m_followDefault = (device == QLatin1String("@DEFAULT_MONITOR@") || device.isEmpty());
-    const QString src = m_followDefault ? resolveDefaultMonitor() : device;
-    if (!buildPipeline(src, error))
+    // Loopback mode: create a dedicated capture sink, redirect media into it,
+    // and record its monitor. Otherwise capture the explicit device as given.
+    m_loopback = (device == QLatin1String("@DEFAULT_MONITOR@") || device.isEmpty());
+    QString src = device;
+    if (m_loopback) {
+        if (!ensureCaptureSink(&src, error))
+            return false;
+        adoptPlayers(); // move whatever is already playing into the capture sink
+    }
+    if (!buildPipeline(src, error)) {
+        if (m_loopback)
+            releasePlayers();
         return false;
-    if (m_followDefault)
+    }
+    if (m_loopback)
         m_watch.start();
     return true;
+}
+
+// Pick (or, as a last resort, create) a null capture sink and return its
+// monitor source name. droid PulseAudio already ships a "sink.null", so we
+// reuse that rather than loading our own module (which can fail on the device);
+// we only create one if no null sink exists, and we unload only what we made.
+bool AudioSource::ensureCaptureSink(QString *monitor, QString *error)
+{
+    auto listSinks = [] {
+        QStringList names;
+        for (const QString &l : pactl({QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sinks")})) {
+            const QStringList c = l.split(QLatin1Char('\t'));
+            if (c.size() >= 2)
+                names << c.at(1).trimmed();
+        }
+        return names;
+    };
+    QStringList names = listSinks();
+
+    // Prefer an existing null sink: the stock "sink.null", a leftover of ours,
+    // then any other "*null*" sink. These are reused as-is (not unloaded on stop).
+    QString found;
+    if (names.contains(QLatin1String(kCaptureSink)))
+        found = QLatin1String(kCaptureSink);
+    else if (names.contains(QStringLiteral("sink.null")))
+        found = QStringLiteral("sink.null");
+    else {
+        for (const QString &n : names)
+            if (n.contains(QLatin1String("null"))) { found = n; break; }
+    }
+    if (!found.isEmpty()) {
+        m_captureSink = found;
+        m_captureModule.clear(); // not ours — leave it loaded on stop
+        *monitor = found + QStringLiteral(".monitor");
+        qCInfo(lcAudio) << "using existing capture sink" << found;
+        return true;
+    }
+
+    // No null sink anywhere: create one (tracked so we unload it on stop).
+    QProcess p;
+    p.start(QStringLiteral("pactl"), {QStringLiteral("load-module"), QStringLiteral("module-null-sink"),
+                                      QStringLiteral("sink_name=%1").arg(QLatin1String(kCaptureSink))});
+    if (p.waitForFinished(2000) && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0)
+        m_captureModule = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+    if (!listSinks().contains(QLatin1String(kCaptureSink))) {
+        if (error)
+            *error = QStringLiteral("no null sink available and could not create one");
+        return false;
+    }
+    m_captureSink = QLatin1String(kCaptureSink);
+    *monitor = m_captureSink + QStringLiteral(".monitor");
+    qCInfo(lcAudio) << "created capture sink" << m_captureSink << "module" << m_captureModule;
+    return true;
+}
+
+// Redirect media ("player") streams into the capture sink so their audio is
+// what we record — and so new tracks the user starts AFTER the session is up
+// are caught too (this runs on every watch tick). Keyed on PulseAudio's
+// policy.group=player (Sailfish/droid tag for music/video apps); as a fallback
+// we also adopt uncorked streams sitting on the known media sinks.
+void AudioSource::adoptPlayers()
+{
+    if (m_captureSink.isEmpty())
+        return;
+    struct In { int idx = -1; QString sink; bool corked = false; bool player = false; QString app; };
+    QList<In> inputs;
+    In cur;
+    bool have = false;
+    auto flush = [&] { if (have && cur.idx >= 0) inputs << cur; cur = In(); have = false; };
+    for (const QString &raw : pactl({QStringLiteral("list"), QStringLiteral("sink-inputs")})) {
+        const QString l = raw.trimmed();
+        if (l.startsWith(QLatin1String("Sink Input #"))) {
+            flush();
+            cur.idx = l.midRef(12).toInt();
+            have = true;
+        } else if (!have) {
+            continue;
+        } else if (l.startsWith(QLatin1String("Sink:"))) {
+            cur.sink = l.mid(5).trimmed();
+        } else if (l.startsWith(QLatin1String("Corked:"))) {
+            cur.corked = l.contains(QLatin1String("yes"));
+        } else if (l.startsWith(QLatin1String("application.name = "))) {
+            cur.app = l.mid(19);
+        } else if (l.contains(QLatin1String("policy.group =")) && l.contains(QLatin1String("player"))) {
+            cur.player = true;
+        } else if (l.startsWith(QLatin1String("media.role = ")) &&
+                   (l.contains(QLatin1String("music")) || l.contains(QLatin1String("video")) || l.contains(QLatin1String("game")))) {
+            cur.player = true;
+        }
+    }
+    flush();
+
+    // Map sink index -> name so we can tell which inputs are already on us / on
+    // a media sink.
+    QHash<int, QString> sinkName;
+    for (const QString &l : pactl({QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sinks")})) {
+        const QStringList c = l.split(QLatin1Char('\t'));
+        if (c.size() >= 2)
+            sinkName.insert(c.at(0).trimmed().toInt(), c.at(1).trimmed());
+    }
+
+    int moved = 0;
+    for (const In &in : inputs) {
+        const QString name = sinkName.value(in.sink.toInt(), in.sink);
+        if (name == m_captureSink)
+            continue; // already captured
+        const bool onMediaSink = name.contains(QLatin1String("deep_buffer"))
+            || name.contains(QLatin1String("primary_output"));
+        if (!in.player && !(onMediaSink && !in.corked))
+            continue; // leave ringtones/alarms/system sounds where they are
+        if (QProcess::execute(QStringLiteral("pactl"),
+                              {QStringLiteral("move-sink-input"), QString::number(in.idx), m_captureSink}) == 0) {
+            ++moved;
+            qCInfo(lcAudio) << "adopted media stream" << in.idx << in.app.trimmed() << "->" << m_captureSink;
+        }
+    }
+    if (moved)
+        emit captureChanged(m_device);
+}
+
+// On stop: move any streams still on the capture sink back to a real speaker
+// sink, then unload the null module we created so the phone audio is normal.
+void AudioSource::releasePlayers()
+{
+    if (m_captureSink.isEmpty())
+        return;
+    const QString hw = hardwarePlaybackSink();
+    QHash<int, QString> sinkName;
+    for (const QString &l : pactl({QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sinks")})) {
+        const QStringList c = l.split(QLatin1Char('\t'));
+        if (c.size() >= 2)
+            sinkName.insert(c.at(0).trimmed().toInt(), c.at(1).trimmed());
+    }
+    int idx = -1;
+    for (const QString &raw : pactl({QStringLiteral("list"), QStringLiteral("sink-inputs")})) {
+        const QString l = raw.trimmed();
+        if (l.startsWith(QLatin1String("Sink Input #"))) {
+            idx = l.midRef(12).toInt();
+        } else if (idx >= 0 && l.startsWith(QLatin1String("Sink:"))) {
+            if (sinkName.value(l.midRef(5).trimmed().toInt()) == m_captureSink)
+                QProcess::execute(QStringLiteral("pactl"), {QStringLiteral("move-sink-input"), QString::number(idx), hw});
+            idx = -1;
+        }
+    }
+    if (!m_captureModule.isEmpty()) {
+        QProcess::execute(QStringLiteral("pactl"), {QStringLiteral("unload-module"), m_captureModule});
+        qCInfo(lcAudio) << "unloaded capture sink module" << m_captureModule;
+    }
+    m_captureModule.clear();
+    m_captureSink.clear();
 }
 
 bool AudioSource::buildPipeline(const QString &src, QString *error)
@@ -230,41 +349,30 @@ void AudioSource::moveCaptureToMonitor()
     }
 }
 
-// Keep the capture correctly routed for the whole session. Runs on the watch
-// timer and does two cheap things:
-//   * if a *different* sink is actually playing (e.g. a native app on
-//     primary_output rather than Android on deep_buffer), switch the pipeline
-//     once to follow it; and
-//   * otherwise re-assert the capture onto the current monitor.
-// The re-assert is the important part: droid re-parks record streams on the
-// microphone over time and across the sink's suspend/resume — notably when the
-// user starts the music minutes after the session is already up — so without it
-// the car gets silence (or the mic) even though the pipeline looks fine. The
-// re-assert only moves the stream when it has actually drifted, so it never
-// rebuilds the pipeline and never causes the choppiness a rebuild would.
+// Keep audio flowing to the car for the whole session. Runs on the watch timer
+// and does two cheap things, neither of which rebuilds the pipeline (so no
+// choppiness):
+//   * adopt any media stream that has appeared since — the user often starts
+//     the music minutes after the session is up, and a new track can land on a
+//     media sink; and
+//   * re-pin our own record stream onto the capture sink's monitor, because
+//     droid keeps re-parking record streams on the microphone over time and
+//     across the sink's suspend/resume.
 void AudioSource::followActiveSink()
 {
-    if (!m_pipeline || !m_followDefault)
+    if (!m_pipeline || !m_loopback)
         return;
-    const QString want = resolveActiveMonitor();
-    if (!want.isEmpty() && want != m_device) {
-        QString error;
-        const QString was = m_device;
-        if (buildPipeline(want, &error)) // reschedules the move onto the new monitor
-            qCInfo(lcAudio) << "followed active sink" << was << "->" << m_device;
-        else
-            qCWarning(lcAudio) << "could not follow active sink to" << want << ":" << error;
-        return;
-    }
-    // Same sink, or nothing new playing yet: hold the capture on the monitor.
+    adoptPlayers();
     moveCaptureToMonitor();
 }
 
 void AudioSource::stop()
 {
     m_watch.stop();
-    m_followDefault = false;
     teardownPipeline();
+    if (m_loopback)
+        releasePlayers();
+    m_loopback = false;
 }
 
 void AudioSource::teardownPipeline()

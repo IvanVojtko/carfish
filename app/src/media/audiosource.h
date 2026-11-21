@@ -18,11 +18,14 @@ public:
     explicit AudioSource(QObject *parent = nullptr);
     ~AudioSource() override;
 
-    // device: PulseAudio source name, e.g. "sink.primary.monitor" or a
-    // dedicated null sink's monitor so the phone speaker stays silent. The
-    // token "@DEFAULT_MONITOR@" (or an empty string) means "capture whatever is
-    // playing": resolved now AND followed while running, since the user often
-    // starts the music seconds after the car session comes up.
+    // device: PulseAudio source name, e.g. "sink.primary.monitor". The token
+    // "@DEFAULT_MONITOR@" (or an empty string) selects "loopback" mode
+    // (reverse-engineered from mrcyjanek/cargadgetd): a dedicated capture sink
+    // is created, every media ("player") stream is redirected into it, and we
+    // capture its monitor. This is deterministic (the capture never drifts onto
+    // the mic the way chasing the active sink did), keeps the phone speaker
+    // silent, and — crucially — catches music the user starts AFTER the car
+    // session is already up, because new streams are re-adopted on every tick.
     bool start(const QString &device, int sampleRate, int channels, QString *error);
     void stop();
     bool isRunning() const { return m_pipeline != nullptr; }
@@ -44,13 +47,20 @@ private slots:
 private:
     static int onNewSample(GstAppSink *sink, void *self);
     bool buildPipeline(const QString &src, QString *error);
-    void moveCaptureToMonitor();   // force the stream off the mic onto m_device
+    void moveCaptureToMonitor();   // force our capture off the mic onto m_device
     void teardownPipeline();
+
+    // Loopback mode (reverse-engineered from cargadgetd):
+    bool ensureCaptureSink(QString *monitor, QString *error); // create/find the capture sink
+    void adoptPlayers();   // redirect media streams into the capture sink
+    void releasePlayers(); // move them back to real hardware + unload the sink
 
     GstElement *m_pipeline = nullptr;
     QString m_device;        // source currently being captured
-    bool m_followDefault = false; // track the actively-playing sink
+    bool m_loopback = false; // manage a dedicated capture sink + stream routing
+    QString m_captureSink;   // our dedicated capture sink name (loopback mode)
+    QString m_captureModule; // module-null-sink id to unload on stop (if we made it)
     int m_sampleRate = 0;
     int m_channels = 0;
-    QTimer m_watch;          // polls for a change of the active sink
+    QTimer m_watch;          // re-adopts new media streams + re-pins the capture
 };

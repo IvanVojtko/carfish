@@ -14,9 +14,55 @@ Rectangle {
     // Preview-only: Controller sets this true to run a no-input nav self-test.
     property bool previewTest: false
     onPreviewTestChanged: if (previewTest && navMap && navMap._selfTest) navMap._selfTest()
-    // Preview-only: open the full-screen map state for a still (host preview).
-    Component.onCompleted: if (typeof previewExpanded !== "undefined" && previewExpanded === "1")
-                               root.mapExpanded = true
+    // Preview-only: open the full-screen map state / search overlay / a nav
+    // self-test, so stills can show those states (host preview).
+    Component.onCompleted: {
+        if (typeof previewExpanded !== "undefined" && previewExpanded === "1")
+            root.mapExpanded = true
+        if (typeof previewSearch !== "undefined" && previewSearch === "1") {
+            root.mapExpanded = true; root.searching = true
+            root.searchText = (typeof previewSearchText !== "undefined" && previewSearchText)
+                              ? previewSearchText : "Main Street 12"
+            searchPreview.start()
+        }
+        if (typeof previewNav !== "undefined" && previewNav === "1") {
+            root.mapExpanded = true; navPreview.start()
+        }
+        if (typeof previewQueue !== "undefined" && previewQueue === "1")
+            root.showQueue = true
+        if (typeof previewHeadingUp !== "undefined" && previewHeadingUp === "1")
+            hdgPreview.start()
+    }
+    // Preview-only: force heading-up rotation (no GPS off-car) to check the map
+    // rotates and the compass turns.
+    Timer {
+        id: hdgPreview; interval: 700
+        onTriggered: if (root.navMap) { root.navMap._dispHeading = 40; root.navMap.headingUp = true; root.navMap.speedKmh = 48 }
+    }
+    // Preview-only: run the destination search once the map has loaded, so a
+    // still shows live (distance-sorted) results.
+    Timer {
+        id: searchPreview; interval: 700
+        onTriggered: if (root.navMap) root.navMap.search(root.searchText)
+    }
+    // Preview-only: fill a sample navigation state once the map has loaded, so a
+    // still shows the turn card + arrival bar without needing the network.
+    Timer {
+        id: navPreview; interval: 700
+        onTriggered: if (root.navMap) {
+            root.navMap.navigating = true
+            root.navMap.destinationLabel = "Main Street 12"
+            root.navMap.nextInstruction = "Turn right onto Mannerheimintie"
+            root.navMap.nextDistance = "300 m"
+            root.navMap.maneuverDir = 4
+            root.navMap.summary = "12 km · 18 min"
+            root.navMap.etaText = "14:32"
+            root.navMap.speedKmh = 48
+            root.navMap.remainingM = 12000
+            if (typeof carScreen !== "undefined" && carScreen && carScreen.setEnergy)
+                carScreen.setEnergy(72, 210, true, false) // EV: 72%, 210 km range
+        }
+    }
 
     // Route a diagnostic line to the device's durable log (~/carfish.log)
     // via the C++ carScreen bridge; a no-op in the plain host preview.
@@ -36,7 +82,9 @@ Rectangle {
     // correctly. Keep the prefix on every internal reference below.
     readonly property bool landscape: width >= height
     readonly property real unit: Math.min(width, height)
-    readonly property real railT: Math.round((root.landscape ? width : height) * (root.landscape ? 0.15 : 0.13))
+    // Slimmer nav rail so the map/content gets more room (Android Auto keeps its
+    // chrome thin).
+    readonly property real railT: Math.round((root.landscape ? width : height) * (root.landscape ? 0.11 : 0.1))
     readonly property real pad: Math.round(root.unit * 0.025)
     readonly property real rad: Math.round(root.unit * 0.03)
 
@@ -55,8 +103,8 @@ Rectangle {
     // app launcher, "phone" the phone screen.
     readonly property bool onDash: activeApp === "maps" || activeApp === "media"
 
-    // Map dominates (like Android Auto); the now-playing pane is the smaller one.
-    readonly property real mapSplit: 0.70
+    // Map dominates (like Android Auto); the now-playing pane is a thin strip.
+    readonly property real mapSplit: 0.76
     readonly property real mapW: root.landscape ? Math.round(root.sw * root.mapSplit - root.pad / 2) : root.sw
     readonly property real mapH: root.landscape ? root.sh : Math.round(root.sh * root.mapSplit - root.pad / 2)
     readonly property real medX: root.landscape ? root.sx + root.mapW + root.pad : root.sx
@@ -77,14 +125,14 @@ Rectangle {
     // --- interactive state ---
     property string activeApp: "maps"
     property bool playing: true
-    property point lastTouch: Qt.point(-1000, -1000)
     // Tap the map to expand it full-screen (media collapses to a bottom
     // minibar); tap the minibar to return to split view (Android Auto style).
     property bool mapExpanded: false
-    readonly property real minibarH: Math.round(unit * 0.17)
+    readonly property real minibarH: Math.round(unit * 0.12)
     // destination search / navigation (driven by MapPane, id realMap)
     property bool searching: false
     property string searchText: ""
+    property bool showQueue: false   // the play-queue / track-list overlay
     readonly property var navMap: (realMap.status === Loader.Ready && realMap.item) ? realMap.item : null
     readonly property bool navigating: navMap ? navMap.navigating : false
 
@@ -340,8 +388,8 @@ Rectangle {
         Rectangle {
             visible: !root.navigating
             x: root.pad; y: root.pad
-            width: Math.min(parent.width - root.pad * 2, root.unit * 0.7)
-            height: Math.round(root.unit * 0.12)
+            width: Math.min(parent.width - root.pad * 2, root.unit * 0.46)
+            height: Math.round(root.unit * 0.082)
             radius: height / 2
             color: root.surface
             Row {
@@ -368,20 +416,129 @@ Rectangle {
             MouseArea { anchors.fill: parent; onClicked: { root.searching = true; root.mapExpanded = true } }
         }
 
-        // turn card (shown when navigating): next maneuver + distance, from the route
+        // Map controls live on the LEFT edge (like Google Maps), stacked below the
+        // search pill / turn card so they never overlap it.
+        readonly property real ctrlTop: root.pad + Math.round(root.unit * 0.12) + root.pad
+
+        // traffic toggle: shown only when a TomTom key is configured.
+        // Flips the live traffic overlay on/off; the Controller persists the state.
         Rectangle {
+            id: trafficBtn
+            visible: typeof carScreen !== "undefined" && carScreen && carScreen.trafficKey !== ""
+            property bool on: visible && carScreen.trafficEnabled
+            anchors.left: parent.left; anchors.top: parent.top
+            anchors.leftMargin: root.pad; anchors.topMargin: mapPane.ctrlTop
+            width: Math.round(root.unit * 0.045); height: width; radius: width * 0.28
+            color: on ? root.accent : root.surface
+            Canvas {
+                anchors.centerIn: parent
+                width: parent.width * 0.5; height: parent.height * 0.62
+                renderStrategy: Canvas.Immediate; renderTarget: Canvas.Image; antialiasing: true
+                property bool on: trafficBtn.on
+                onOnChanged: requestPaint()
+                onPaint: {
+                    var ctx = getContext("2d"); ctx.reset(); var w = width, h = height
+                    ctx.strokeStyle = trafficBtn.on ? "white" : root.dim
+                    ctx.lineWidth = Math.max(1.5, w * 0.1)
+                    ctx.strokeRect(w * 0.2, 0, w * 0.6, h) // light housing
+                    var cx = w * 0.5, r = w * 0.12
+                    var cols = trafficBtn.on ? ["#ff3b30", "#ffcc00", "#34c759"]
+                                             : [root.dim, root.dim, root.dim]
+                    for (var i = 0; i < 3; i++) {
+                        ctx.beginPath(); ctx.fillStyle = cols[i]
+                        ctx.arc(cx, h * (0.22 + i * 0.28), r, 0, 2 * Math.PI); ctx.fill()
+                    }
+                }
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: if (typeof carScreen !== "undefined" && carScreen)
+                               carScreen.trafficEnabled = !carScreen.trafficEnabled
+            }
+        }
+
+        // compass toggle (left edge, below traffic): switches the map between
+        // north-up (fixed) and heading-up (rotates with the car), like Google
+        // Maps. The needle rotates to point to actual north on screen.
+        Rectangle {
+            id: compassBtn
+            visible: root.navMap !== null
+            property real mapRot: (root.navMap && root.navMap.headingUp) ? -root.navMap._dispHeading : 0
+            property bool headingUp: root.navMap ? root.navMap.headingUp : false
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.leftMargin: root.pad
+            // sit below the traffic button when it's showing, else at the top control row.
+            anchors.topMargin: mapPane.ctrlTop + (trafficBtn.visible ? trafficBtn.height + root.pad : 0)
+            width: Math.round(root.unit * 0.045); height: width; radius: width / 2
+            color: root.surface
+            Canvas {
+                id: compassFace
+                anchors.centerIn: parent
+                width: parent.width * 0.74; height: width
+                renderStrategy: Canvas.Immediate; renderTarget: Canvas.Image; antialiasing: true
+                rotation: compassBtn.mapRot
+                Behavior on rotation { RotationAnimation { duration: 220; direction: RotationAnimation.Shortest } }
+                property bool hu: compassBtn.headingUp
+                onHuChanged: requestPaint()
+                onPaint: {
+                    var ctx = getContext("2d"); ctx.reset()
+                    var w = width, h = height, cx = w / 2, cy = h / 2
+                    // north half (red), south half (grey) needle
+                    ctx.beginPath(); ctx.moveTo(cx, h * 0.08); ctx.lineTo(w * 0.72, cy); ctx.lineTo(w * 0.28, cy)
+                    ctx.closePath(); ctx.fillStyle = "#ff3b30"; ctx.fill()
+                    ctx.beginPath(); ctx.moveTo(cx, h * 0.92); ctx.lineTo(w * 0.72, cy); ctx.lineTo(w * 0.28, cy)
+                    ctx.closePath(); ctx.fillStyle = root.dim; ctx.fill()
+                }
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: if (root.navMap) root.navMap.headingUp = !root.navMap.headingUp
+            }
+        }
+
+        // current speed (bottom-right), like Google Maps: a round badge with the
+        // live GPS speed. Hidden until we have a valid fix.
+        Rectangle {
+            id: speedBadge
+            visible: root.navMap !== null && root.navMap.speedKmh >= 0
+            anchors.right: parent.right; anchors.bottom: parent.bottom
+            anchors.margins: root.pad
+            width: Math.round(root.unit * 0.11); height: width; radius: width / 2
+            color: root.surface
+            border.width: Math.max(1, Math.round(width * 0.04)); border.color: root.dim
+            Column {
+                anchors.centerIn: parent; spacing: 0
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: root.navMap ? root.navMap.speedKmh : 0
+                    color: root.fg; font.bold: true; font.pixelSize: Math.round(speedBadge.width * 0.4)
+                }
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "km/h"; color: root.dim; font.pixelSize: Math.round(speedBadge.width * 0.18)
+                }
+            }
+        }
+
+        // turn card (shown when navigating): a compact green maneuver card like
+        // Android Auto — arrow + distance + instruction. Route controls live in
+        // the trip card at the bottom-left.
+        Rectangle {
+            id: turnCard
             visible: root.navigating
             x: root.pad; y: root.pad
-            width: Math.min(parent.width - root.pad * 2, root.unit * 0.7)
-            height: root.unit * 0.17
-            radius: root.rad * 0.8
-            color: root.surface
+            width: Math.min(parent.width - root.pad * 2, root.unit * 0.52)
+            height: root.unit * 0.12
+            radius: root.rad * 0.7
+            color: root.accent2
             Row {
                 anchors.fill: parent
-                anchors.margins: parent.height * 0.18
-                spacing: parent.height * 0.25
+                anchors.margins: parent.height * 0.16
+                spacing: parent.height * 0.18
                 Canvas {
                     id: turnArrow
+                    anchors.verticalCenter: parent.verticalCenter
                     width: parent.height; height: width
                     renderStrategy: Canvas.Immediate; renderTarget: Canvas.Image; antialiasing: true
                     // QtLocation RouteManeuver.Direction: 2-5 right family, 8-11 left,
@@ -390,7 +547,7 @@ Rectangle {
                     onDirChanged: requestPaint()
                     onPaint: {
                         var ctx = getContext("2d"); ctx.reset(); var w = width, h = height;
-                        ctx.strokeStyle = root.accent2; ctx.fillStyle = root.accent2;
+                        ctx.strokeStyle = "white"; ctx.fillStyle = "white";
                         ctx.lineWidth = Math.max(3, w * 0.12); ctx.lineJoin = "round"; ctx.lineCap = "round";
                         var right = dir >= 2 && dir <= 5, left = dir >= 8 && dir <= 11, uturn = dir === 6 || dir === 7;
                         if (uturn) {
@@ -413,23 +570,96 @@ Rectangle {
                 }
                 Column {
                     anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - parent.height * 1.25 - parent.spacing * 2
+                    width: parent.width - turnArrow.width - parent.spacing
                     Text {
-                        color: root.fg; font.pixelSize: parent.parent.height * 0.4; font.bold: true
+                        color: "white"; font.pixelSize: turnCard.height * 0.3; font.bold: true
                         text: root.navMap ? root.navMap.nextDistance : ""
                     }
                     Text {
                         width: parent.width; elide: Text.ElideRight
-                        color: root.dim; font.pixelSize: parent.parent.height * 0.26
+                        color: "#eafff1"; font.pixelSize: turnCard.height * 0.2
                         text: root.navMap ? (root.navMap.nextInstruction || root.navMap.summary) : ""
                     }
                 }
-                // clear route
+            }
+        }
+
+        // trip card (shown when navigating): a compact dark card like Android
+        // Auto — remaining time (headline), then "distance · arrival", plus a
+        // small button to end navigation.
+        Rectangle {
+            id: tripCard
+            visible: root.navigating
+            anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.margins: root.pad
+            height: Math.round(root.unit * 0.115)
+            width: tripRow.width + height * 0.5
+            radius: root.rad * 0.7
+            color: root.night ? "#d9161d27" : "#e6161d27"   // dark translucent, both themes
+            Row {
+                id: tripRow
+                anchors.centerIn: parent
+                spacing: tripCard.height * 0.28
+                Column {
+                    anchors.verticalCenter: parent.verticalCenter
+                    Text {
+                        color: "white"; font.pixelSize: tripCard.height * 0.36; font.bold: true
+                        // remaining travel time, from the live summary ("12 km · 18 min")
+                        text: {
+                            if (!root.navMap || !root.navMap.summary) return "--"
+                            var p = root.navMap.summary.split("·")
+                            return p.length > 1 ? p[1].trim() : root.navMap.summary
+                        }
+                    }
+                    Text {
+                        color: "#b9c6d4"; font.pixelSize: tripCard.height * 0.2
+                        text: {
+                            if (!root.navMap) return ""
+                            var p = root.navMap.summary ? root.navMap.summary.split("·") : []
+                            var dist = p.length > 0 ? p[0].trim() : ""
+                            return dist + (root.navMap.etaText ? "  ·  " + root.navMap.etaText : "")
+                        }
+                    }
+                }
+                // battery charge at arrival (electric cars only, when the head unit
+                // reports the car's energy). Shows a small battery + the estimated %.
+                Row {
+                    visible: root.navMap && root.navMap.evArrivalPct >= 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: tripCard.height * 0.1
+                    property int pct: root.navMap ? root.navMap.evArrivalPct : 0
+                    property color battColor: pct <= 10 ? "#ff3b30" : (pct <= 20 ? "#ffcc00" : "#34c759")
+                    Canvas {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: tripCard.height * 0.46; height: tripCard.height * 0.26
+                        renderStrategy: Canvas.Immediate; renderTarget: Canvas.Image; antialiasing: true
+                        property int pct: parent.pct
+                        property color col: parent.battColor
+                        onPctChanged: requestPaint()
+                        onColChanged: requestPaint()
+                        onPaint: {
+                            var ctx = getContext("2d"); ctx.reset()
+                            var w = width, h = height, lw = Math.max(1, w * 0.05), bw = w * 0.85
+                            ctx.strokeStyle = "white"; ctx.lineWidth = lw
+                            ctx.strokeRect(lw, lw, bw - lw * 2, h - lw * 2)
+                            ctx.fillStyle = "white"; ctx.fillRect(bw, h * 0.32, w * 0.12, h * 0.36)
+                            ctx.fillStyle = col
+                            var innerW = (bw - lw * 4) * Math.max(0, Math.min(1, pct / 100))
+                            ctx.fillRect(lw * 2, lw * 2, innerW, h - lw * 4)
+                        }
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: parent.battColor; font.bold: true
+                        font.pixelSize: tripCard.height * 0.24
+                        text: parent.pct + "%"
+                    }
+                }
+                // end navigation
                 Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
-                    width: parent.height * 0.75; height: width; radius: width / 2
-                    color: root.surface2
-                    Text { anchors.centerIn: parent; color: root.fg; font.pixelSize: parent.height * 0.5; text: "✕" }
+                    width: tripCard.height * 0.6; height: width; radius: width / 2
+                    color: "#33ffffff"
+                    Text { anchors.centerIn: parent; color: "white"; font.pixelSize: parent.height * 0.5; text: "✕" }
                     MouseArea { anchors.fill: parent; onClicked: if (root.navMap) root.navMap.clearRoute() }
                 }
             }
@@ -477,7 +707,7 @@ Rectangle {
             id: art
             x: mediaPane.m; y: mediaPane.m
             width: mediaPane.strip ? mediaPane.height - mediaPane.m * 2
-                                   : Math.min(parent.width - mediaPane.m * 2, parent.height * 0.42)
+                                   : Math.min(parent.width - mediaPane.m * 2, parent.height * 0.34)
             height: width
             radius: root.rad * 0.8
             gradient: Gradient {
@@ -498,6 +728,29 @@ Rectangle {
                                            || media.artUrl.indexOf("http") === 0)) ? media.artUrl : ""
                 visible: status === Image.Ready
             }
+            // Tap the artwork to open the play queue (track list) of the current
+            // player, so a passenger can jump to any song in it.
+            MouseArea {
+                anchors.fill: parent
+                enabled: root.hasMedia
+                onClicked: { media.refreshQueue(); root.showQueue = true }
+            }
+            // "list" hint badge in a corner so it reads as tappable.
+            Rectangle {
+                visible: root.hasMedia
+                anchors.right: parent.right; anchors.bottom: parent.bottom
+                anchors.margins: parent.width * 0.06
+                width: parent.width * 0.2; height: width; radius: height * 0.3
+                color: "#99000000"
+                Column {
+                    anchors.centerIn: parent; spacing: Math.max(1, parent.height * 0.1)
+                    Repeater {
+                        model: 3
+                        Rectangle { width: parent.parent.width * 0.5; height: Math.max(1.5, parent.parent.height * 0.1)
+                                    radius: height / 2; color: "white" }
+                    }
+                }
+            }
         }
 
         // transport controls. A container Item with an EXPLICIT size (so its
@@ -505,8 +758,8 @@ Rectangle {
         // of buttons. Right-aligned in strip mode, bottom-centred in column mode.
         Item {
             id: controls
-            property real btn: mediaPane.uh * (mediaPane.strip ? 0.42 : 0.26)
-            property real sp: mediaPane.uh * (mediaPane.strip ? 0.09 : 0.06)
+            property real btn: mediaPane.uh * (mediaPane.strip ? 0.36 : 0.22)
+            property real sp: mediaPane.uh * (mediaPane.strip ? 0.08 : 0.055)
             width: btn * 3.2 + sp * 2
             height: btn * 1.2
             // Explicit x/y (no ternary anchors, which conflict): right-centred in
@@ -1012,7 +1265,7 @@ Rectangle {
         x: root.sx; y: root.sy; width: root.sw; height: root.sh
         radius: root.rad; color: root.surface; clip: true; z: 50
 
-        readonly property real kbH: height * 0.42
+        readonly property real kbH: height * 0.5
         readonly property real queryH: Math.round(root.unit * 0.11)
 
         // debounce live geocoding as the user types
@@ -1061,11 +1314,20 @@ Rectangle {
                 width: results.width; height: root.unit * 0.1
                 color: resArea.pressed ? root.surface2 : "transparent"
                 Text {
-                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.left: parent.left; anchors.right: distText.left
                     anchors.leftMargin: root.pad; anchors.rightMargin: root.pad
                     anchors.verticalCenter: parent.verticalCenter
                     elide: Text.ElideRight; color: root.fg; font.pixelSize: root.unit * 0.032
                     text: modelData.address.text
+                }
+                // Distance from here (results are sorted nearest-first).
+                Text {
+                    id: distText
+                    anchors.right: parent.right; anchors.rightMargin: root.pad
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: root.dim; font.pixelSize: root.unit * 0.028
+                    text: (root.navMap && modelData._dist !== undefined)
+                          ? root.navMap._fmtDist(modelData._dist) : ""
                 }
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.surface2 }
                 MouseArea {
@@ -1093,10 +1355,11 @@ Rectangle {
             width: parent.width - root.pad * 2
             height: searchOverlay.kbH
             spacing: root.pad * 0.5
-            property real rowH: (height - spacing * 3) / 4
+            // 4 character rows (a top number row for house numbers) + the action row.
+            property real rowH: (height - spacing * 4) / 5
 
             Repeater {
-                model: [ "qwertyuiop", "asdfghjkl", "zxcvbnm" ]
+                model: [ "1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm" ]
                 Row {
                     anchors.horizontalCenter: parent.horizontalCenter
                     spacing: root.pad * 0.5
@@ -1144,31 +1407,87 @@ Rectangle {
         }
     }
 
-    // ------------------------------------------------ touch feedback overlay
-    // Shows where the head unit tapped, without stealing clicks from the
-    // controls below (press is declined so it propagates).
-    MouseArea {
-        anchors.fill: parent
-        z: 1000
-        onPressed: {
-            root.lastTouch = Qt.point(mouse.x, mouse.y);
-            ripple.restart();
-            mouse.accepted = false;
-        }
-    }
+    // Full-area play-queue overlay: the current player's track list (from MPRIS
+    // TrackList). Tap a row to jump to that song. Opened by tapping the artwork.
     Rectangle {
-        id: marker
-        visible: ripple.running
-        width: root.unit * 0.12; height: width; radius: width / 2
-        x: root.lastTouch.x - width / 2
-        y: root.lastTouch.y - height / 2
-        color: "transparent"
-        border.color: root.accent
-        border.width: Math.max(2, width * 0.06)
-        opacity: 0.9
-        NumberAnimation {
-            id: ripple; target: marker; property: "opacity"
-            from: 0.9; to: 0.0; duration: 600
+        id: queueOverlay
+        visible: root.showQueue
+        x: root.sx; y: root.sy; width: root.sw; height: root.sh
+        radius: root.rad; color: root.surface; clip: true; z: 51
+
+        Item {
+            id: qHeader
+            x: root.pad; y: root.pad
+            width: parent.width - root.pad * 2; height: Math.round(root.unit * 0.11)
+            Text {
+                anchors.left: parent.left; anchors.right: closeQ.left; anchors.rightMargin: root.pad
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideRight; color: root.fg
+                font.pixelSize: parent.height * 0.48; font.bold: true
+                text: qsTr("Up next") + (root.hasMedia && media.title ? "  ·  " + media.title : "")
+            }
+            Rectangle {
+                id: closeQ
+                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                width: parent.height * 1.7; height: parent.height * 0.82; radius: height / 2
+                color: root.surface2
+                Text { anchors.centerIn: parent; color: root.fg; font.pixelSize: parent.height * 0.4; text: qsTr("Close") }
+                MouseArea { anchors.fill: parent; onClicked: root.showQueue = false }
+            }
+        }
+
+        ListView {
+            id: queueList
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.top: qHeader.bottom; anchors.topMargin: root.pad
+            anchors.bottom: parent.bottom; anchors.bottomMargin: root.pad
+            anchors.leftMargin: root.pad; anchors.rightMargin: root.pad
+            clip: true
+            model: root.hasMedia ? media.queue : []
+            delegate: Rectangle {
+                width: queueList.width; height: root.unit * 0.105
+                color: qRow.pressed ? root.surface2 : "transparent"
+                Row {
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.leftMargin: root.pad; anchors.rightMargin: root.pad
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: root.pad
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: root.unit * 0.022; height: width; radius: width / 2
+                        color: modelData.current ? root.accent : "transparent"
+                    }
+                    Column {
+                        width: parent.width - root.unit * 0.022 - parent.spacing
+                        Text {
+                            width: parent.width; elide: Text.ElideRight
+                            color: modelData.current ? root.accent : root.fg
+                            font.pixelSize: root.unit * 0.034; font.bold: modelData.current === true
+                            text: modelData.title ? modelData.title : qsTr("Unknown track")
+                        }
+                        Text {
+                            width: parent.width; elide: Text.ElideRight
+                            color: root.dim; font.pixelSize: root.unit * 0.026
+                            text: modelData.artist ? modelData.artist : ""
+                        }
+                    }
+                }
+                Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.surface2 }
+                MouseArea {
+                    id: qRow
+                    anchors.fill: parent
+                    onClicked: { media.goToTrack(modelData.id); root.showQueue = false }
+                }
+            }
+            Text {
+                anchors.centerIn: parent
+                visible: queueList.count === 0
+                color: root.dim; font.pixelSize: root.unit * 0.032
+                horizontalAlignment: Text.AlignHCenter
+                width: parent.width - root.pad * 2; wrapMode: Text.Wrap
+                text: qsTr("No track list available from this player")
+            }
         }
     }
+
 }

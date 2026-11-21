@@ -77,6 +77,7 @@ WirelessSetup::WirelessSetup(QObject *parent)
     connect(m_profile, &BluezProfile::connectionClosed, this, [this] {
         m_infoRetry.stop();
         m_negotiateTimeout.stop();
+        m_keepalive.stop();
         m_sendTimer.stop();
         emit log(tr("RFCOMM link closed%1").arg(m_gotMessage ? QString() : tr(" (head unit sent nothing)")));
         emit status(tr("Bluetooth link closed"));
@@ -102,6 +103,16 @@ WirelessSetup::WirelessSetup(QObject *parent)
     // Pace outgoing frames at least kFrameGapMs apart.
     m_sendTimer.setSingleShot(true);
     connect(&m_sendTimer, &QTimer::timeout, this, &WirelessSetup::drainSendQueue);
+
+    // Keepalive: once the version exchange is done, ping the head unit every 1 s.
+    // Receiver-library head units go silent / close RFCOMM without this (a real
+    // phone pings at 1 Hz); a strict OEM unit simply answers or ignores them.
+    m_keepalive.setInterval(1000);
+    connect(&m_keepalive, &QTimer::timeout, this, [this] {
+        wpp::WifiPingRequest ping;
+        ping.set_timestamp_ms(QDateTime::currentMSecsSinceEpoch());
+        send(wpp::WIFI_PING_REQUEST, ping.SerializeAsString());
+    });
 
     // Resend WifiInfoRequest once if the credentials are slow to arrive.
     m_infoRetry.setSingleShot(true);
@@ -153,6 +164,7 @@ void WirelessSetup::stop()
     m_reconnectPending = false;
     m_infoRetry.stop();
     m_negotiateTimeout.stop();
+    m_keepalive.stop();
     m_sendTimer.stop();
     m_sendQueue.clear();
     m_wifi->cancel();
@@ -166,25 +178,28 @@ void WirelessSetup::retrySoon()
     if (m_stopped)
         return;
     m_ready = false; // allow scheduleReconnect to run again after a live session
-    scheduleReconnect(tr("projection session ended"));
+    // The head unit resets its own Bluetooth/AP when it ends a session, so an
+    // immediate page often hits br-connection-page-timeout. Give it a few seconds.
+    scheduleReconnect(tr("projection session ended"), 5000);
 }
 
 // Queue a fresh bring-up attempt after a backoff. De-duplicated so several
 // near-simultaneous failures (timeout + link close) schedule only one retry.
-void WirelessSetup::scheduleReconnect(const QString &why)
+void WirelessSetup::scheduleReconnect(const QString &why, int minDelayMs)
 {
     if (m_stopped || m_reconnectPending || m_ready)
         return;
     m_reconnectPending = true;
     m_infoRetry.stop();
     m_negotiateTimeout.stop();
+    m_keepalive.stop();
     m_sendTimer.stop();
     m_sendQueue.clear();
     m_wifi->cancel();
     // Drop the current RFCOMM link so the next attempt starts from a clean SDP
     // connect. The resulting connectionClosed is ignored (a reconnect is pending).
     m_profile->closeConnection();
-    const int delay = qMin(2000 + m_retryCount * 1500, 8000);
+    const int delay = qMax(minDelayMs, qMin(2000 + m_retryCount * 1500, 8000));
     ++m_retryCount;
     emit log(tr("wireless bring-up failed (%1); retrying in %2 s").arg(why).arg(delay / 1000));
     emit status(tr("Reconnecting to head unit (attempt %1)").arg(m_retryCount + 1));
@@ -235,7 +250,9 @@ void WirelessSetup::writeFrame(quint16 id, const std::string &body)
     qToBigEndian<quint16>(quint16(body.size()), reinterpret_cast<uchar *>(msg.data()));
     qToBigEndian<quint16>(id, reinterpret_cast<uchar *>(msg.data() + 2));
     msg.append(body.data(), int(body.size()));
-    emit log(tr("WPP tx %1 (%2 B)").arg(wppName(id)).arg(int(body.size())));
+    // Don't spam the durable log with the 1 Hz keepalive ping traffic.
+    if (id != wpp::WIFI_PING_REQUEST)
+        emit log(tr("WPP tx %1 (%2 B)").arg(wppName(id)).arg(int(body.size())));
     m_profile->write(msg);
 }
 
@@ -263,9 +280,13 @@ void WirelessSetup::onRfcommData(const QByteArray &data)
 void WirelessSetup::handleMessage(quint16 id, const QByteArray &body)
 {
     m_gotMessage = true;
-    if (!m_ready)
-        m_negotiateTimeout.start(); // each message from the HU extends the deadline
-    emit log(tr("WPP rx %1 (%2 B)").arg(wppName(id)).arg(body.size()));
+    // Each message that signals real progress extends the deadline, but NOT the
+    // ping responses to our own 1 Hz keepalive — otherwise a head unit that
+    // answers pings yet never delivers credentials would keep us waiting forever.
+    if (!m_ready && id != wpp::WIFI_PING_RESPONSE && id != wpp::WIFI_PING_REQUEST)
+        m_negotiateTimeout.start();
+    if (id != wpp::WIFI_PING_RESPONSE) // don't spam the log with 1 Hz ping replies
+        emit log(tr("WPP rx %1 (%2 B)").arg(wppName(id)).arg(body.size()));
     switch (id) {
     case wpp::WIFI_VERSION_REQUEST: {
         wpp::WifiVersionRequest req;
@@ -293,6 +314,12 @@ void WirelessSetup::handleMessage(quint16 id, const QByteArray &body)
         di->set_device_uuid(kInstanceId.toStdString());
         di->set_bluetooth_name(kDeviceName.toStdString());
         send(wpp::WIFI_VERSION_RESPONSE, resp.SerializeAsString());
+        // Start 1 Hz keepalive pings now. Without them a receiver-library head
+        // unit stops talking after the version exchange (our "HU went silent"),
+        // which also means it was dropping the fallback prompt below.
+        if (!m_keepalive.isActive())
+            emit log(tr("starting 1 Hz keepalive pings to the head unit"));
+        m_keepalive.start();
         // A genuine phone never sends a WifiStartRequest; it waits for the head
         // unit's. But if this head unit stays silent after the version exchange,
         // fall back to prompting it (the log shows who sent WifiStartRequest, so

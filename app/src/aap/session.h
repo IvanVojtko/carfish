@@ -4,6 +4,7 @@
 #include "framer.h"
 
 #include <QHash>
+#include <QSet>
 #include <QObject>
 #include <QRect>
 #include <QSize>
@@ -51,6 +52,12 @@ public:
     void start();
     void shutdown();
 
+    // Report the current call to the head unit so it shows the in-AA call UI.
+    // state is a PhoneStatus::State value; number/name identify the caller; a
+    // non-call state (INACTIVE) with empty strings clears it. No-op until the HU
+    // has advertised + opened its phone-status channel.
+    void updateCall(int state, const QString &number, const QString &name);
+
 signals:
     void stateChanged(const QString &state);
     void logMessage(const QString &line);
@@ -59,11 +66,19 @@ signals:
     void voiceRequested(bool active);   // steering-wheel voice / push-to-talk
     void mediaKey(const QString &action);  // play, pause, next, prev, ff, rew
     void navKey(const QString &action);    // back, home, menu, up/down/left/right, rotary±, select
+    // Answer/reject taps from the head unit's in-AA call UI (and CALL/ENDCALL
+    // wheel buttons), for the controller to drive the phone with.
+    void phoneAnswer();
+    void phoneReject();
+    void phoneChannelReady(); // the HU opened its phone-status channel; push current call
+    // Car fuel/energy level (from the FUEL sensor). For an EV, levelPct is the
+    // battery state-of-charge and rangeKm the remaining range; electric says so.
+    void energyStatus(int levelPct, int rangeKm, bool electric, bool low);
 
 private:
     enum class Phase { WaitVersion, Handshake, WaitAuth, Discovery, Running, Closed };
 
-    enum class Kind { Video, MediaAudio, Input, Sensor, Mic, Nav };
+    enum class Kind { Video, MediaAudio, Input, Sensor, Mic, Nav, PhoneStatus };
     struct VideoMode {
         QSize size;
         QRect contentRect; // visible part after the HU crops its margins
@@ -85,6 +100,7 @@ private:
         QRect contentRect;
         int fps = 30;
         QSize touchSize;
+        QVector<int> huKeycodes; // keycodes_supported the HU advertised for this input
         // audio
         int sampleRate = 48000;
         int channels = 2;
@@ -99,8 +115,10 @@ private:
     void onMediaConfig(ChannelInfo &ch, quint8 channel, const QByteArray &body);
     void onVideoFocus(ChannelInfo &ch, quint8 channel, const QByteArray &body);
     void onInput(const ChannelInfo &ch, const QByteArray &body);
+    void onPhoneStatusInput(const QByteArray &body);
     void onKeyEvent(const QByteArray &body);
     void dispatchKey(quint32 keycode, bool down, bool longpress);
+    void dispatchRelative(quint32 keycode, int delta); // rotary/knob/scroll steps
     void onSensorBatch(const QByteArray &body);
     void onAudioFocus(const QByteArray &body);
 
@@ -143,6 +161,9 @@ private:
     int m_mediaAudioChannel = -1;
     int m_micChannel = -1;
     int m_navChannel = -1;
+    int m_phoneStatusChannel = -1;
+    QSet<int> m_sensorsAvailable; // sensor types the head unit advertised
+    bool m_evCar = false;          // car advertised FUEL_TYPE_ELECTRIC
     int m_navMinIntervalMs = 1000; // rate floor the head unit advertises
     bool m_navActive = false;      // STATUS(ACTIVE) already sent
     bool m_navClusterReady = false;

@@ -55,6 +55,13 @@ WifiHelper::WifiHelper(QObject *parent)
     m_routeRetry.setSingleShot(true);
     m_routeRetry.setInterval(1200);
     connect(&m_routeRetry, &QTimer::timeout, this, &WifiHelper::applyRoutingFromService);
+    // While we're on the car WiFi, keep re-asserting the cellular default route.
+    // Cellular can be briefly not-"ready" right as the car WiFi associates (so a
+    // one-shot pin misses it, leaving the gatewayless car WiFi as default = no
+    // internet). Re-checking every few seconds recovers connectivity on its own
+    // the moment cellular is back.
+    m_enforce.setInterval(4000);
+    connect(&m_enforce, &QTimer::timeout, this, &WifiHelper::enforceCellularDefault);
 }
 
 // Re-read the joined service's IPv4 and (re)apply the routing change. Used by the
@@ -95,6 +102,8 @@ void WifiHelper::release()
     emit log(QStringLiteral("helper: release"));
     m_retry.stop();
     m_routeRetry.stop();
+    m_enforce.stop();
+    m_cellularPinned = false;
     revertRouting();
     stopWatching();
     m_servicePath.clear();
@@ -169,8 +178,21 @@ void WifiHelper::watchService(const QString &path)
     auto *w = new QDBusPendingCallWatcher(bus.asyncCall(msg, 60000), this);
     connect(w, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
         QDBusPendingReply<> r = *w;
-        if (r.isError() && r.error().name() != QLatin1String("net.connman.Error.AlreadyConnected"))
-            emit failed(QStringLiteral("connman Connect: ") + r.error().message());
+        if (r.isError()) {
+            // "AlreadyConnected" and "InProgress" are not failures — connman is
+            // already associating this service (often because flipping the IPv4
+            // config above kicked off a connect). The PropertyChanged watcher
+            // reports "ready" (join) or "failure" (retry), so just wait for it;
+            // emitting failed here tore down a connection that was coming up.
+            const QString name = r.error().name();
+            if (name == QLatin1String("net.connman.Error.AlreadyConnected")
+                    || name == QLatin1String("net.connman.Error.InProgress")) {
+                emit log(QStringLiteral("helper: connman already associating (%1), waiting for state")
+                             .arg(r.error().message()));
+            } else {
+                emit failed(QStringLiteral("connman Connect: ") + r.error().message());
+            }
+        }
         w->deleteLater();
     });
 }
@@ -281,11 +303,11 @@ void WifiHelper::applyRouting(const QVariantMap &ipv4)
     // connman still tends to make the (now gatewayless) car WiFi its default
     // service and install `default dev wlan0 scope link`, leaving cellular — which
     // is only "ready", not "online" — with NO default route, so nothing routes.
-    // Pin the kernel default route to cellular ourselves, re-asserting a few times
-    // while connman settles the car WiFi down to "ready". Then log ground truth.
-    QTimer::singleShot(800, this, &WifiHelper::enforceCellularDefault);
-    QTimer::singleShot(2500, this, &WifiHelper::enforceCellularDefault);
-    QTimer::singleShot(5000, this, &WifiHelper::enforceCellularDefault);
+    // Pin the kernel default route to cellular ourselves, and keep re-asserting it
+    // (m_enforce) so it recovers if cellular was briefly not ready at join time.
+    m_cellularPinned = false;
+    enforceCellularDefault();
+    m_enforce.start();
     QTimer::singleShot(1500, this, &WifiHelper::logDiagnostics);
     QTimer::singleShot(5500, this, &WifiHelper::logDiagnostics);
 }
@@ -317,15 +339,26 @@ bool WifiHelper::cellularRoute(QString &iface, QString &gw)
 // default route connman left on the WiFi interface, then install cellular's.
 void WifiHelper::enforceCellularDefault()
 {
-    if (!m_rerouted)
+    if (!m_rerouted) {
+        m_enforce.stop();
         return; // only while the car WiFi routing override is active
+    }
     QString cellIface, cellGw;
     if (!cellularRoute(cellIface, cellGw)) {
-        emit log(QStringLiteral("helper: no active cellular service for the default route"));
+        // Log only on transition so the 4 s re-check isn't spammy.
+        if (m_cellularPinned)
+            emit log(QStringLiteral("helper: cellular not ready; internet paused until it returns"));
+        m_cellularPinned = false;
         return;
     }
     const QString wifiIface = m_wifiIface.isEmpty() ? QStringLiteral("wlan0") : m_wifiIface;
-    auto ip = [](const QStringList &args) { QProcess p; p.start(QStringLiteral("ip"), args); p.waitForFinished(2000); };
+    // Absolute path: the helper's systemd PATH may lack /usr/sbin, and a bare
+    // "ip" that fails to launch would make this route pinning a silent no-op.
+    auto ip = [](const QStringList &args) {
+        QProcess p;
+        p.start(QStringLiteral("/usr/sbin/ip"), args);
+        p.waitForFinished(2000);
+    };
     // Drop connman's gatewayless default via the car WiFi (repeat to clear dupes).
     ip({QStringLiteral("route"), QStringLiteral("del"), QStringLiteral("default"), QStringLiteral("dev"), wifiIface});
     ip({QStringLiteral("route"), QStringLiteral("del"), QStringLiteral("default"), QStringLiteral("dev"), wifiIface});
@@ -336,8 +369,10 @@ void WifiHelper::enforceCellularDefault()
         add << QStringLiteral("via") << cellGw;
     add << QStringLiteral("dev") << cellIface;
     ip(add);
-    emit log(QStringLiteral("helper: pinned default route to cellular (%1%2)")
-                 .arg(cellIface, cellGw.isEmpty() ? QString() : QStringLiteral(" via ") + cellGw));
+    if (!m_cellularPinned) // log only on transition (the 4 s re-check is quiet)
+        emit log(QStringLiteral("helper: pinned default route to cellular (%1%2)")
+                     .arg(cellIface, cellGw.isEmpty() ? QString() : QStringLiteral(" via ") + cellGw));
+    m_cellularPinned = true;
 }
 
 void WifiHelper::logDiagnostics()
@@ -354,8 +389,8 @@ void WifiHelper::logDiagnostics()
     emit log(QStringLiteral("helper: resolv.conf -> %1").arg(dns.isEmpty() ? QStringLiteral("(no nameservers!)") : dns.trimmed()));
 
     QProcess ipr;
-    ipr.start(QStringLiteral("ip"), {QStringLiteral("-4"), QStringLiteral("route"), QStringLiteral("show"),
-                                     QStringLiteral("default")});
+    ipr.start(QStringLiteral("/usr/sbin/ip"), {QStringLiteral("-4"), QStringLiteral("route"), QStringLiteral("show"),
+                                               QStringLiteral("default")});
     if (ipr.waitForFinished(2000)) {
         const QString out = QString::fromUtf8(ipr.readAllStandardOutput()).trimmed().replace('\n', QLatin1Char(';'));
         emit log(QStringLiteral("helper: default route -> %1").arg(out.isEmpty() ? QStringLiteral("(none)") : out));
@@ -364,15 +399,40 @@ void WifiHelper::logDiagnostics()
 
 void WifiHelper::revertRouting()
 {
+    m_enforce.stop();
+    m_cellularPinned = false;
     if (!m_rerouted || m_servicePath.isEmpty())
         return;
+
+    // The car WiFi has no internet. If we just revert it to DHCP, connman
+    // reinstalls its gatewayless default route and blackholes ALL traffic — the
+    // "no phone data" symptom, which then persists across the reconnect storm.
+    // So, in order, with no window where data is dark:
+    //   1. pin cellular as the default route NOW (data works immediately);
+    //   2. disconnect the car WiFi service so its dead default route is removed
+    //      (cellular then stays the only default); connman keeps the saved config;
+    //   3. restore the service's DHCP config for the next clean join.
+    QString cellIface, cellGw;
+    if (cellularRoute(cellIface, cellGw)) {
+        auto ip = [](const QStringList &args) {
+            QProcess p;
+            p.start(QStringLiteral("/usr/sbin/ip"), args);
+            p.waitForFinished(2000);
+        };
+        QStringList add = {QStringLiteral("route"), QStringLiteral("replace"), QStringLiteral("default")};
+        if (!cellGw.isEmpty())
+            add << QStringLiteral("via") << cellGw;
+        add << QStringLiteral("dev") << cellIface;
+        ip(add);
+    }
+    QDBusInterface svc(kConnman, m_servicePath, kServiceIface, QDBusConnection::systemBus());
+    svc.call(QStringLiteral("Disconnect"));
     QVariantMap cfg;
     cfg.insert(QStringLiteral("Method"), QStringLiteral("dhcp"));
-    QDBusInterface svc(kConnman, m_servicePath, kServiceIface, QDBusConnection::systemBus());
     svc.call(QStringLiteral("SetProperty"), QStringLiteral("IPv4.Configuration"),
              QVariant::fromValue(QDBusVariant(QVariant(cfg))));
     m_rerouted = false;
-    emit log(QStringLiteral("helper: restored normal WiFi routing (DHCP)"));
+    emit log(QStringLiteral("helper: released car WiFi; internet stays on cellular"));
 }
 
 // ---------------------------------------------------------------- adaptor

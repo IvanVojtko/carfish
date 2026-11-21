@@ -1,6 +1,6 @@
 Name:       carfish
 Summary:    Android Auto projection for Sailfish OS
-Version:    0.1.0
+Version:    0.2.0
 Release:    1
 License:    GPLv3
 URL:        https://example.org/carfish
@@ -21,12 +21,15 @@ Recommends: geoclue-provider-hybris-binder
 Requires:   voicecall-qt5
 Requires:   libcommhistory-qt5
 Requires:   qtcontacts-sqlite-qt5
+# carfish-helper reads the (privileged) contacts DB via QSqlDatabase/SQLite.
+Requires:   qt5-plugin-sqldriver-sqlite
 # hardware H.264 encoder (droidvenc) on real devices
 Recommends: gstreamer1.0-droid
 BuildRequires:  pkgconfig(sailfishapp) >= 1.0.2
 BuildRequires:  pkgconfig(Qt5Core)
 BuildRequires:  pkgconfig(Qt5Network)
 BuildRequires:  pkgconfig(Qt5DBus)
+BuildRequires:  pkgconfig(Qt5Sql)
 BuildRequires:  pkgconfig(Qt5Qml)
 BuildRequires:  pkgconfig(Qt5Quick)
 BuildRequires:  pkgconfig(openssl)

@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # no sailfishapp) to test the protocol and media pipeline against a fake HU.
 option(DESKTOP_BUILD "Headless host build for testing" OFF)
 
-find_package(Qt5 COMPONENTS Core Network DBus Qml Gui Quick REQUIRED)
+find_package(Qt5 COMPONENTS Core Network DBus Qml Gui Quick Sql REQUIRED)
 
 include(FindPkgConfig)
 set(DEP_MODULES
@@ -103,7 +103,8 @@ add_executable(carfish
     src/aap/session.cpp
     src/transport/transport.h
     src/transport/tcptransport.cpp
-    src/transport/usbaccessorytransport.cpp
+    src/transport/usbffstransport.cpp
+    src/transport/usbhelperclient.cpp
     src/wireless/bluezprofile.cpp
     src/wireless/wifijoiner.cpp
     src/wireless/wirelesssetup.cpp
@@ -155,8 +156,10 @@ endif()
 if(NOT DESKTOP_BUILD)
     add_executable(carfish-helper
         helper/helpermain.cpp
-        helper/wifihelper.cpp)
-    target_link_libraries(carfish-helper Qt5::Core Qt5::DBus)
+        helper/wifihelper.cpp
+        helper/usbgadget.cpp
+        helper/contactshelper.cpp)
+    target_link_libraries(carfish-helper Qt5::Core Qt5::DBus Qt5::Sql)
     install(TARGETS carfish-helper RUNTIME DESTINATION bin)
 endif()
 

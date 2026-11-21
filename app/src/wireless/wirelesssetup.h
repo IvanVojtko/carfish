@@ -46,7 +46,7 @@ private:
     void drainSendQueue();
     void onWifiJoined(const QString &localAddress);
     void maybeReady();         // emit readyForProjection once joined + endpoint known
-    void scheduleReconnect(const QString &why); // auto-retry the bring-up on failure
+    void scheduleReconnect(const QString &why, int minDelayMs = 0); // auto-retry the bring-up on failure
     void doReconnect();        // re-initiate the RFCOMM connect after a backoff
 
     BluezProfile *m_profile;
@@ -78,4 +78,10 @@ private:
     QVector<Outgoing> m_sendQueue;
     QTimer m_sendTimer;
     qint64 m_lastSendMs = 0;
+
+    // Phone-originated WifiPingRequest keepalives. Google-receiver head units
+    // drop (or stop talking on) the RFCOMM link if ~10 s pass with no phone ping
+    // after the version exchange; a real Android Auto phone pings every 1 s. We
+    // start this once we've answered the HU's WifiVersionRequest.
+    QTimer m_keepalive;
 };

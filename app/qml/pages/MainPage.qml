@@ -67,6 +67,33 @@ Page {
                 text: controller.certStatus
             }
 
+            SectionHeader { text: qsTr("Live traffic") }
+
+            TextField {
+                width: parent.width
+                label: qsTr("TomTom API key")
+                placeholderText: qsTr("Paste a free TomTom key")
+                text: controller.trafficKey
+                onTextChanged: controller.trafficKey = text
+            }
+
+            TextSwitch {
+                text: qsTr("Show traffic on the map")
+                description: qsTr("Colours roads by congestion for the area on screen.")
+                enabled: controller.trafficKey !== ""
+                checked: controller.trafficEnabled
+                onClicked: controller.trafficEnabled = checked
+            }
+
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryColor
+                text: qsTr("Live traffic needs a free TomTom API key (developer.tomtom.com) — OpenStreetMap has no traffic data.")
+            }
+
             SectionHeader { text: qsTr("Status") }
 
             Label {

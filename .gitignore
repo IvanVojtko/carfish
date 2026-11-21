@@ -91,6 +91,10 @@ openh264-obj/
 carfish-preview.png
 car_*.png
 *-preview.png
+# Preview/UI stills and camera photos dropped in the tree while developing.
+carfish-ui-*.png
+carfish-[hv]-*.png
+ProCam_*.jpg
 aoa-probe.log
 carfish.log
 *.log
