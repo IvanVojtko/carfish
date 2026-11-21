@@ -55,6 +55,10 @@ Item {
     // 1/s). While navigating we look up the route point nearest to us, so a side
     // street next to the road doesn't win.
     property int speedLimit: -1
+    // True when speedLimit is the country's default for this kind of road
+    // (e.g. an untagged residential street in Germany -> 50), not a tagged
+    // or signed limit. Shown differently and never flags speeding.
+    property bool speedLimitInferred: false
     property var _limitAt: null
     property double _limitTime: 0
     property bool _limitBusy: false
@@ -83,8 +87,8 @@ Item {
                 // Ignore paths the car can't be on (keep the last limit).
                 if (r.category !== "highway" || /^(footway|cycleway|path|pedestrian|steps|track|bridleway|corridor)$/.test(r.type))
                     return
-                var lim = _parseMaxspeed((r.extratags || {}).maxspeed)
-                if (lim > 0) { _limitMisses = 0; speedLimit = lim }
+                var res = _limitFor(r.type, r.extratags || {}, (r.address || {}).country_code)
+                if (res.kmh > 0) { _limitMisses = 0; speedLimit = res.kmh; speedLimitInferred = res.inferred }
                 else if (++_limitMisses >= 2) speedLimit = -1  // road has no tag: don't show a stale limit
             } catch (e) { }
         }
@@ -92,8 +96,60 @@ Item {
                  + "&lat=" + q.latitude.toFixed(6) + "&lon=" + q.longitude.toFixed(6))
         xhr.send()
     }
+    // Legal defaults (km/h) for implicit OSM limits ("AT:urban") and for roads
+    // with no limit tagged at all. -1 = no general limit (German Autobahn).
+    readonly property var _limitDefaults: ({
+        sk: { urban: 50, rural: 90, motorway: 130, trunk: 130, living_street: 20 },
+        cz: { urban: 50, rural: 90, motorway: 130, living_street: 20 },
+        pl: { urban: 50, rural: 90, motorway: 140, expressway: 120, living_street: 20 },
+        hu: { urban: 50, rural: 90, motorway: 130, trunk: 110, living_street: 20 },
+        at: { urban: 50, rural: 100, motorway: 130 },
+        de: { urban: 50, rural: 100, motorway: -1 },
+        fi: { urban: 50, rural: 80, motorway: 120, living_street: 20 },
+        fr: { urban: 50, rural: 80, motorway: 130 },
+        it: { urban: 50, rural: 90, motorway: 130 },
+        gb: { urban: 48, rural: 97, nsl_single: 97, nsl_dual: 113, motorway: 113 }
+    })
+    // {kmh, inferred} for a reverse-geocoded road: a numeric maxspeed wins;
+    // then an implicit zone ("AT:urban", "DE:zone30") in maxspeed /
+    // maxspeed:type / source:maxspeed / zone:maxspeed; then, untagged, the
+    // country's default for the road type (residential, lit or built-up
+    // through roads -> urban; motorway; living street), marked inferred.
+    function _limitFor(type, t, cc) {
+        var n = _parseMaxspeed(t.maxspeed)
+        if (n > 0) return { kmh: n, inferred: false }
+        if (t.maxspeed === "none") return { kmh: -1, inferred: false }
+        var keys = ["maxspeed", "maxspeed:type", "source:maxspeed", "zone:maxspeed"]
+        for (var i = 0; i < keys.length; i++) {
+            n = _zoneLimit(t[keys[i]])
+            if (n > 0) return { kmh: n, inferred: false }
+        }
+        var d = _limitDefaults[(cc || "").toLowerCase()]
+        if (!d) return { kmh: -1, inferred: false }
+        var kind = ""
+        if (type === "motorway") kind = "motorway"
+        else if (type === "living_street") kind = "living_street"
+        else if (type === "residential") kind = "urban"
+        else if (/^(primary|secondary|tertiary|unclassified)$/.test(type)
+                 && (t.lit === "yes" || (t.sidewalk && t.sidewalk !== "no") || t.abutters))
+            kind = "urban"
+        n = kind && d[kind] !== undefined ? d[kind] : -1
+        return { kmh: n, inferred: n > 0 }
+    }
+    // "AT:urban" -> that country's urban default; "DE:zone30"/"zone:30" -> 30.
+    function _zoneLimit(v) {
+        if (!v) return -1
+        v = String(v)
+        var z = /zone:?([0-9]+)/i.exec(v)
+        if (z) return parseInt(z[1])
+        var m = /^([A-Za-z]{2}):([a-z_]+)$/.exec(v.trim())
+        if (!m) return -1
+        var d = _limitDefaults[m[1].toLowerCase()]
+        var k = m[2] === "living_street" ? "living_street" : m[2]
+        return (d && d[k] !== undefined) ? d[k] : -1
+    }
     // OSM maxspeed: "50", "50 mph", "50;30" (take the first). Implicit zone
-    // values ("FI:urban") and "none"/"signals" give -1 (not shown).
+    // values ("FI:urban") and "none"/"signals" give -1 here (see _zoneLimit).
     function _parseMaxspeed(v) {
         if (!v) return -1
         var m = /^\s*([0-9]+)\s*(mph|knots)?/i.exec(String(v).split(";")[0])
@@ -199,11 +255,34 @@ Item {
         return (here.longitude - d) + "," + (here.latitude + d) + ","
              + (here.longitude + d) + "," + (here.latitude - d)
     }
+    // A short title + "street number, town" line for a Nominatim hit instead
+    // of its full display_name ("Marienplatz, 8, Marienplatz, Altstadt,
+    // München, Bayern, 80331, Deutschland, ..."). label = "title, sub" is
+    // what goes to the trip card, the cluster and recent destinations.
+    function _geoNames(r, dist) {
+        var a = r.address || {}
+        var street = a.road || a.pedestrian || a.square || a.footway || ""
+        var hn = a.house_number || ""
+        if (street && hn) street += " " + hn
+        var town = a.city || a.town || a.village || a.municipality || a.hamlet || ""
+        var title = r.name || street || hn || (r.display_name || "").split(",")[0]
+        var parts = []
+        if (street && street !== title) parts.push(street)
+        if (town && town !== title) parts.push(town)
+        if (!parts.length) {   // a town/region itself: say where it is
+            var reg = a.state || a.county || ""
+            if (reg && reg !== title) parts.push(reg)
+        }
+        if (a.country && (dist > 60000 || !parts.length)) parts.push(a.country)
+        var sub = parts.join(", ")
+        return { title: title, sub: sub, label: sub ? title + ", " + sub : title }
+    }
     function _geoRows(arr, here) {
         var out = []
         for (var i = 0; arr && i < arr.length; i++) {
             var c = QtPositioning.coordinate(parseFloat(arr[i].lat), parseFloat(arr[i].lon))
-            out.push({ address: { text: arr[i].display_name }, coordinate: c,
+            var nm = _geoNames(arr[i], here.distanceTo(c))
+            out.push({ address: { text: nm.label }, title: nm.title, sub: nm.sub, coordinate: c,
                        _dist: here.distanceTo(c), _imp: arr[i].importance || 0,
                        _key: arr[i].osm_type + arr[i].osm_id, _rank: i,
                        _name: (arr[i].name || "").toLowerCase(), _prank: arr[i].place_rank || 30 })
@@ -217,7 +296,7 @@ Item {
         var here = (gps.position.latitudeValid && gps.position.longitudeValid)
                    ? gps.position.coordinate : QtPositioning.coordinate(centerLat, centerLon)
         var q = "&q=" + encodeURIComponent(text)
-        var base = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=10"
+        var base = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=10&addressdetails=1"
         _geoSend(base + "&bounded=1&viewbox=" + _geoBox(here, 0.3) + q, function(arr) {
             if (gen !== _geoGen) return
             _geoLocal = _geoRows(arr, here).sort(function(a, b) {
@@ -332,8 +411,25 @@ Item {
         return best
     }
 
+    // Charging stop: navigateVia() routes to a charger while remembering the
+    // trip's real destination in finalDest. When that leg ends (arrival or
+    // stopped by hand) it moves to resumeDest, which CarMain offers as
+    // "Continue to …" until tapped or dismissed. Any other navigateTo drops it.
+    property var finalDest: null      // {coord, label} while heading to a charger
+    property var resumeDest: null     // {coord, label} after the charger leg ended
+    function navigateVia(coord, label) {
+        var fin = finalDest || ((navigating && _destCoord)
+                                ? { coord: _destCoord, label: destinationLabel } : null)
+        navigateTo(coord, label)
+        finalDest = fin
+    }
+    function resumeTrip() {
+        var r = resumeDest
+        if (r) navigateTo(r.coord, r.label)
+    }
     function navigateTo(coord, label) {
         if (!coord || !coord.isValid) return
+        finalDest = null; resumeDest = null
         var from = (gps.position.latitudeValid && gps.position.longitudeValid)
                    ? gps.position.coordinate : QtPositioning.coordinate(centerLat, centerLon)
         destinationLabel = label || ""
@@ -344,6 +440,11 @@ Item {
     }
 
     // Current travel heading (degrees, 0=N) when GPS reports one, else -1.
+    // Where we are (GPS, else the map centre).
+    function hereCoord() {
+        return (gps.position.latitudeValid && gps.position.longitudeValid)
+               ? gps.position.coordinate : QtPositioning.coordinate(centerLat, centerLon)
+    }
     function _headingNow() {
         return gps.position.directionValid ? gps.position.direction : -1
     }
@@ -438,6 +539,7 @@ Item {
     }
 
     function clearRoute() {
+        if (finalDest) { resumeDest = finalDest; finalDest = null }
         navigating = false
         _routeCoords = []; _steps = []; _curStep = 0; _destCoord = null
         _totalM = 0; _totalS = 0

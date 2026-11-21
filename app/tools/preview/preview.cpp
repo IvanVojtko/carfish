@@ -79,8 +79,16 @@ public:
     { m_recent.prepend(entry(l, lat, lon)); while (m_recent.size() > 8) m_recent.removeLast(); emit placesChanged(); }
     Q_INVOKABLE void removeRecentPlace(int i)
     { if (i >= 0 && i < m_recent.size()) { m_recent.removeAt(i); emit placesChanged(); } }
-    void seedPlaces()
+    void seedPlaces(bool germany)
     {
+        if (germany) {   // PREVIEW_PLACES=de: Munich, incl. an old full-display_name recent
+            m_places[QStringLiteral("home")] = entry(QStringLiteral("Sendlinger Straße 1, München"), 48.1351, 11.5700);
+            m_recent << entry(QStringLiteral("Marienplatz, Marienplatz 8, München"), 48.1374, 11.5755)
+                     << entry(QStringLiteral("Rewe, 12/3, Leopoldstraße, Schwabing, München, Bayern, 80802, Deutschland"), 48.1600, 11.5860)
+                     << entry(QStringLiteral("Augsburg, Bayern, Deutschland"), 48.3705, 10.8978);
+            emit placesChanged();
+            return;
+        }
         m_places[QStringLiteral("home")] = entry(QStringLiteral("Runeberginkatu 5, Etu-Töölö, Helsinki, 00100, Finland"), 60.1736, 24.9283);
         m_recent << entry(QStringLiteral("Kamppi Shopping Centre, Urho Kekkosen katu 1, Kamppi, Helsinki"), 60.1690, 24.9320)
                  << entry(QStringLiteral("Helsinki Airport, Lentoasemantie 1, Vantaa, Finland"), 60.3172, 24.9633)
@@ -206,7 +214,7 @@ int main(int argc, char **argv)
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_SEARCH")));
     // PREVIEW_PLACES=1 seeds sample saved places and opens the search on them.
     if (!qgetenv("PREVIEW_PLACES").isEmpty())
-        screen.seedPlaces();
+        screen.seedPlaces(qgetenv("PREVIEW_PLACES") == "de");
     view.rootContext()->setContextProperty(QStringLiteral("previewPlaces"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_PLACES")));
     // PREVIEW_EV_PCT=<n> sets the EV charge used by the nav preview (low-battery
@@ -219,6 +227,9 @@ int main(int argc, char **argv)
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_CHARGERS")));
     view.rootContext()->setContextProperty(QStringLiteral("previewSearchText"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_SEARCH_TEXT")));
+    // PREVIEW_STOP=1|resume: charging-stop pill during nav / "Continue to" card after.
+    view.rootContext()->setContextProperty(QStringLiteral("previewStop"),
+                                           QString::fromLocal8Bit(qgetenv("PREVIEW_STOP")));
     // PREVIEW_CENTER=lat,lon moves the map there before the search preview runs.
     view.rootContext()->setContextProperty(QStringLiteral("previewCenter"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_CENTER")));

@@ -78,7 +78,19 @@ Rectangle {
             root.navMap.speedKmh = 48
             root.navMap.remainingM = 12000
             // PREVIEW_LIMIT=<n> shows a posted speed limit (48 km/h > 40 = speeding).
-            if (typeof previewLimit !== "undefined" && previewLimit) root.navMap.speedLimit = parseInt(previewLimit)
+            // A trailing "i" ("50i") shows it as an inferred country default.
+            if (typeof previewLimit !== "undefined" && previewLimit) {
+                root.navMap.speedLimit = parseInt(previewLimit)
+                root.navMap.speedLimitInferred = /i$/.test(previewLimit)
+            }
+            // PREVIEW_STOP=1 heads to a charging stop; =resume shows the
+            // "Continue to …" card that follows it.
+            if (typeof previewStop !== "undefined" && previewStop) {
+                var fin = { coord: QtPositioning.coordinate(48.1374, 11.5755),
+                            label: "Marienplatz, Marienplatz 8, München" }
+                if (previewStop === "resume") { root.navMap.navigating = false; root.navMap.resumeDest = fin }
+                else { root.navMap.destinationLabel = "IONITY München"; root.navMap.finalDest = fin }
+            }
             // PREVIEW_EV_PCT=<n> sets the car's charge so stills can show the
             // amber/red arrival states and the low-battery warning.
             var soc = (typeof previewEvPct !== "undefined" && previewEvPct) ? parseInt(previewEvPct) : 72
@@ -175,6 +187,53 @@ Rectangle {
         root.navMap.navigateTo(QtPositioning.coordinate(pl.lat, pl.lon), pl.label)
         if (bumpRecent) carScreen.addRecentPlace(pl.label, pl.lat, pl.lon) // move to the top
         root.searching = false; root.searchText = ""
+    }
+    // "Marienplatz, Marienplatz 8, München" -> title + rest.
+    // Older recents hold Nominatim's full display_name; a house number alone
+    // ("8/1, Marienplatz, …") keeps the street in the title.
+    function splitLabel(label) {
+        var p = String(label || "").split(",").map(function(x) { return x.trim() })
+        var n = /^[0-9]/.test(p[0]) && p.length > 1 ? 2 : 1
+        return { title: p.slice(0, n).join(", "), sub: p.slice(n, n + 2).join(", ") }
+    }
+    // Lower-case and strip accents so "munchen" matches "München".
+    readonly property var _fold: ({
+        "á":"a","ä":"a","à":"a","â":"a","ã":"a","å":"a","ą":"a","č":"c","ć":"c","ç":"c",
+        "ď":"d","é":"e","ě":"e","ë":"e","è":"e","ê":"e","ę":"e","í":"i","ì":"i","î":"i",
+        "ï":"i","ĺ":"l","ľ":"l","ł":"l","ň":"n","ń":"n","ñ":"n","ó":"o","ô":"o","ö":"o",
+        "ò":"o","õ":"o","ő":"o","ŕ":"r","ř":"r","š":"s","ś":"s","ß":"ss","ť":"t","ú":"u",
+        "ů":"u","ü":"u","ù":"u","û":"u","ű":"u","ý":"y","ÿ":"y","ž":"z","ź":"z","ż":"z"
+    })
+    function foldText(t) {
+        return String(t || "").toLowerCase().replace(/[^\u0000-\u007f]/g, function(ch) {
+            return root._fold[ch] !== undefined ? root._fold[ch] : ch
+        })
+    }
+    // Saved places (Home, Work, recent destinations) matching what's typed,
+    // listed above the online results: instant, and they work offline.
+    // Every typed word must appear in the place's name/label.
+    function savedMatches(q) {
+        if (!root.havePlaces || root.pickPlace || root.chargerMode) return []
+        var words = foldText(q).split(/\s+/).filter(function(w) { return w.length > 0 })
+        if (!words.length || foldText(q).trim().length < 2) return []
+        var here = root.navMap ? root.navMap.hereCoord() : null
+        var cands = [], pl = carScreen.places || {}, rec = carScreen.recentPlaces || []
+        if (pl.home) cands.push({ kind: "home", name: "Home", place: pl.home })
+        if (pl.work) cands.push({ kind: "work", name: "Work", place: pl.work })
+        for (var i = 0; i < rec.length; i++) cands.push({ kind: "recent", name: "", place: rec[i] })
+        var out = []
+        for (var j = 0; j < cands.length && out.length < 4; j++) {
+            var c = cands[j], hay = foldText(c.name + " " + c.place.label), ok = true
+            for (var w = 0; w < words.length && ok; w++) ok = hay.indexOf(words[w]) >= 0
+            if (!ok) continue
+            var coord = QtPositioning.coordinate(c.place.lat, c.place.lon)
+            var sp = splitLabel(c.place.label)
+            out.push({ address: { text: c.place.label }, coordinate: coord,
+                       title: c.name || sp.title, sub: c.name ? sp.title : sp.sub,
+                       _dist: here ? here.distanceTo(coord) : undefined,
+                       _kind: c.kind, _place: c.place })
+        }
+        return out
     }
     property bool showQueue: false   // the play-queue / track-list overlay
     readonly property var navMap: (realMap.status === Loader.Ready && realMap.item) ? realMap.item : null
@@ -590,6 +649,7 @@ Rectangle {
             width: Math.round(root.unit * 0.11); height: width; radius: width / 2
             // Over the posted limit: the badge turns red.
             readonly property bool speeding: root.navMap !== null && root.navMap.speedLimit > 0
+                                             && !root.navMap.speedLimitInferred
                                              && root.navMap.speedKmh > root.navMap.speedLimit
             color: speeding ? "#e5392f" : root.surface
             border.width: Math.max(1, Math.round(width * 0.04)); border.color: speeding ? "#e5392f" : root.dim
@@ -617,12 +677,17 @@ Rectangle {
             anchors.right: speedBadge.left; anchors.rightMargin: root.pad * 0.5
             anchors.verticalCenter: speedBadge.verticalCenter
             width: Math.round(speedBadge.width * 0.86); height: width; radius: width / 2
+            // A country default for the road type (no limit tagged on it) gets a
+            // thinner, paler ring: likely right, but not a posted sign.
+            readonly property bool inferred: root.navMap !== null && root.navMap.speedLimitInferred
             color: "white"
-            border.width: Math.round(width * 0.12); border.color: "#e5392f"
+            opacity: inferred ? 0.85 : 1
+            border.width: Math.round(width * (inferred ? 0.07 : 0.12))
+            border.color: inferred ? "#e8908a" : "#e5392f"
             Text {
                 anchors.centerIn: parent
                 text: root.navMap ? root.navMap.speedLimit : ""
-                color: "#111"; font.bold: true
+                color: limitSign.inferred ? "#555" : "#111"; font.bold: true
                 font.pixelSize: Math.round(limitSign.width * (text.length > 2 ? 0.34 : 0.42))
             }
         }
@@ -695,7 +760,7 @@ Rectangle {
         Rectangle {
             id: lowBattCard
             readonly property int pct: root.navMap ? root.navMap.evArrivalPct : -1
-            visible: root.navigating && pct >= 0 && pct <= 10
+            visible: root.navigating && pct >= 0 && pct <= 10 && !(root.navMap && root.navMap.finalDest)
             anchors.left: tripCard.left; anchors.bottom: tripCard.top; anchors.bottomMargin: root.pad * 0.5
             height: Math.round(root.unit * 0.075)
             width: lowBattRow.width + height * 0.7
@@ -723,6 +788,70 @@ Rectangle {
                 }
             }
             MouseArea { id: lowBattArea; anchors.fill: parent; onClicked: root.openChargers() }
+        }
+
+        // Heading to a charging stop: say where the trip continues afterwards.
+        Rectangle {
+            id: stopCard
+            visible: root.navigating && root.navMap !== null && !!root.navMap.finalDest
+            anchors.left: tripCard.left; anchors.bottom: tripCard.top; anchors.bottomMargin: root.pad * 0.5
+            height: Math.round(root.unit * 0.075)
+            width: Math.min(stopRow.width + height * 0.7, parent.width - root.pad * 2)
+            radius: height / 2
+            color: root.accent2
+            Row {
+                id: stopRow
+                anchors.centerIn: parent
+                spacing: stopCard.height * 0.15
+                Loader {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: stopCard.height * 0.62; height: width
+                    sourceComponent: iconPainter
+                    onLoaded: { item.name = "bolt"; item.col = "white" }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: "white"; font.pixelSize: stopCard.height * 0.34
+                    text: "Charging stop  ·  then "
+                          + (root.navMap && root.navMap.finalDest ? root.splitLabel(root.navMap.finalDest.label).title : "")
+                }
+            }
+        }
+
+        // After a charging stop: one tap continues to the original destination.
+        Rectangle {
+            id: resumeCard
+            visible: !root.navigating && root.navMap !== null && !!root.navMap.resumeDest
+            anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.margins: root.pad
+            height: Math.round(root.unit * 0.115)
+            width: Math.min(resumeRow.width + height * 0.5, parent.width - root.pad * 2)
+            radius: root.rad * 0.7
+            color: resumeArea.pressed ? Qt.darker(root.accent2, 1.15) : root.accent2
+            MouseArea { id: resumeArea; anchors.fill: parent; onClicked: root.navMap.resumeTrip() }
+            Row {
+                id: resumeRow
+                anchors.centerIn: parent
+                spacing: resumeCard.height * 0.25
+                Column {
+                    anchors.verticalCenter: parent.verticalCenter
+                    Text {
+                        color: "white"; font.bold: true; font.pixelSize: resumeCard.height * 0.3
+                        text: "Continue to " + (root.navMap && root.navMap.resumeDest
+                                                ? root.splitLabel(root.navMap.resumeDest.label).title : "")
+                    }
+                    Text {
+                        color: "#eafff1"; font.pixelSize: resumeCard.height * 0.2
+                        text: "After charging · tap to start"
+                    }
+                }
+                Rectangle {   // dismiss
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: resumeCard.height * 0.6; height: width; radius: width / 2
+                    color: "#33ffffff"
+                    Text { anchors.centerIn: parent; color: "white"; font.pixelSize: parent.height * 0.5; text: "✕" }
+                    MouseArea { anchors.fill: parent; onClicked: root.navMap.resumeDest = null }
+                }
+            }
         }
 
         // trip card (shown when navigating): a compact dark card like Android
@@ -1485,7 +1614,7 @@ Rectangle {
                 var rec = carScreen.recentPlaces || []
                 for (var i = 0; i < rec.length; i++)
                     out.push({ kind: "recent", icon: "recent", index: i, place: rec[i],
-                               title: rec[i].label.split(",").slice(0, 2).join(",") })
+                               title: root.splitLabel(rec[i].label).title })
                 return out
             }
             delegate: Rectangle {
@@ -1518,7 +1647,7 @@ Rectangle {
                         color: root.dim; font.pixelSize: root.unit * 0.026
                         visible: text.length > 0
                         text: modelData.kind === "recent"
-                              ? modelData.place.label.split(",").slice(2, 4).join(",").trim()
+                              ? root.splitLabel(modelData.place.label).sub
                               : modelData.kind === "chargers" ? "From OpenStreetMap, within 25 km"
                               : (saved ? modelData.place.label : "Tap to set")
                     }
@@ -1551,23 +1680,49 @@ Rectangle {
             anchors.leftMargin: root.pad; anchors.rightMargin: root.pad
             clip: true
             visible: !placesList.visible
-            model: !root.navMap ? null : root.chargerMode ? root.navMap.chargerModel : root.navMap.geocodeModel
+            model: {
+                if (!root.navMap) return null
+                if (root.chargerMode) return root.navMap.chargerModel
+                var saved = root.savedMatches(root.searchText)
+                // Drop online hits that are one of the saved places shown above.
+                var online = root.navMap.geocodeModel.filter(function(r) {
+                    for (var i = 0; i < saved.length; i++)
+                        if (saved[i].address.text === r.address.text
+                                || saved[i].coordinate.distanceTo(r.coordinate) < 60) return false
+                    return true
+                })
+                return saved.concat(online)
+            }
             delegate: Rectangle {
                 width: results.width; height: root.unit * 0.1
                 color: resArea.pressed ? root.surface2 : "transparent"
+                // Saved places (Home/Work/recent) carry an icon like the places list.
+                Loader {
+                    id: resIcon
+                    active: !!modelData._kind
+                    anchors.left: parent.left; anchors.leftMargin: active ? root.pad : 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: active ? parent.height * 0.42 : 0; height: width
+                    sourceComponent: iconPainter
+                    onLoaded: {
+                        item.name = modelData._kind
+                        item.col = modelData._kind === "recent" ? root.dim : root.accent
+                    }
+                }
                 Column {
-                    anchors.left: parent.left; anchors.right: distText.left
+                    anchors.left: resIcon.right; anchors.right: distText.left
                     anchors.leftMargin: root.pad; anchors.rightMargin: root.pad
                     anchors.verticalCenter: parent.verticalCenter
                     Text {
                         width: parent.width
-                        elide: Text.ElideRight; color: root.fg; font.pixelSize: root.unit * 0.032
-                        text: modelData.address.text
+                        elide: Text.ElideRight; color: root.fg; font.pixelSize: root.unit * 0.033
+                        font.bold: !!modelData.sub
+                        text: modelData.title || modelData.address.text
                     }
-                    // Charger details (power, points, operator).
+                    // "street, town" for places; power/points/operator for chargers.
                     Text {
                         width: parent.width; visible: text.length > 0
-                        elide: Text.ElideRight; color: root.dim; font.pixelSize: root.unit * 0.025
+                        elide: Text.ElideRight; color: root.dim; font.pixelSize: root.unit * 0.026
                         text: modelData.sub || ""
                     }
                 }
@@ -1592,7 +1747,16 @@ Rectangle {
                             root.pickPlace = ""; root.searchText = ""
                             return
                         }
-                        if (root.navMap) root.navMap.navigateTo(c, label)
+                        if (modelData._kind) {   // a saved place listed above the online hits
+                            root.goToPlace(modelData._place, modelData._kind === "recent")
+                            return
+                        }
+                        // A charger picked during a trip becomes a stop: the
+                        // original destination is offered again after it.
+                        if (root.navMap) {
+                            if (root.chargerMode && root.navigating) root.navMap.navigateVia(c, label)
+                            else root.navMap.navigateTo(c, label)
+                        }
                         if (root.havePlaces && !root.chargerMode) carScreen.addRecentPlace(label, c.latitude, c.longitude)
                         root.searching = false; root.searchText = ""
                     }
