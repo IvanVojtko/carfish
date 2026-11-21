@@ -213,6 +213,8 @@ int main(int argc, char **argv)
     // warning below ~10% at arrival); PREVIEW_CHARGERS=1 opens nearby chargers.
     view.rootContext()->setContextProperty(QStringLiteral("previewEvPct"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_EV_PCT")));
+    view.rootContext()->setContextProperty(QStringLiteral("previewLimit"),
+                                           QString::fromLocal8Bit(qgetenv("PREVIEW_LIMIT")));
     view.rootContext()->setContextProperty(QStringLiteral("previewChargers"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_CHARGERS")));
     view.rootContext()->setContextProperty(QStringLiteral("previewSearchText"),

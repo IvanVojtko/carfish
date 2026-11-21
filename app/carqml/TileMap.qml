@@ -49,6 +49,59 @@ Item {
     // Current speed in km/h from the GPS fix (-1 until known / when invalid), so
     // CarMain can show a Google-Maps-style speedometer in the corner.
     property int speedKmh: -1
+    // Posted speed limit of the road we're on (km/h), -1 when unknown. From the
+    // OSM maxspeed tag of the nearest road via Nominatim reverse geocoding,
+    // throttled (one lookup per >= 8 s and >= 120 m moved; usage policy allows
+    // 1/s). While navigating we look up the route point nearest to us, so a side
+    // street next to the road doesn't win.
+    property int speedLimit: -1
+    property var _limitAt: null
+    property double _limitTime: 0
+    property bool _limitBusy: false
+    property int _limitMisses: 0
+    function _checkSpeedLimit(here) {
+        if (_limitBusy) return
+        var now = Date.now()
+        if (_limitAt && (now - _limitTime < 8000 || here.distanceTo(_limitAt) < 120)) return
+        var q = here
+        if (navigating && _routeCoords.length) {
+            var best = -1, c = _routeCoords
+            for (var i = 0; i < c.length; i++) {
+                var v = QtPositioning.coordinate(c[i][1], c[i][0]), d = here.distanceTo(v)
+                if (best < 0 || d < best) { best = d; q = v }
+            }
+            if (best > offRouteM) q = here   // off the route: use where we are
+        }
+        _limitBusy = true; _limitAt = here; _limitTime = now
+        var xhr = new XMLHttpRequest()
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return
+            _limitBusy = false
+            if (xhr.status !== 200) return
+            try {
+                var r = JSON.parse(xhr.responseText)
+                // Ignore paths the car can't be on (keep the last limit).
+                if (r.category !== "highway" || /^(footway|cycleway|path|pedestrian|steps|track|bridleway|corridor)$/.test(r.type))
+                    return
+                var lim = _parseMaxspeed((r.extratags || {}).maxspeed)
+                if (lim > 0) { _limitMisses = 0; speedLimit = lim }
+                else if (++_limitMisses >= 2) speedLimit = -1  // road has no tag: don't show a stale limit
+            } catch (e) { }
+        }
+        xhr.open("GET", "https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&extratags=1&layer=address"
+                 + "&lat=" + q.latitude.toFixed(6) + "&lon=" + q.longitude.toFixed(6))
+        xhr.send()
+    }
+    // OSM maxspeed: "50", "50 mph", "50;30" (take the first). Implicit zone
+    // values ("FI:urban") and "none"/"signals" give -1 (not shown).
+    function _parseMaxspeed(v) {
+        if (!v) return -1
+        var m = /^\s*([0-9]+)\s*(mph|knots)?/i.exec(String(v).split(";")[0])
+        if (!m) return -1
+        var n = parseInt(m[1])
+        if (m[2] && m[2].toLowerCase() === "mph") n = Math.round(n * 1.609344)
+        return (n > 0 && n < 200) ? n : -1
+    }
     // Tiles/route/markers live on a SQUARE canvas sized to the viewport diagonal
     // so that, when rotated, its corners still cover the whole visible area.
     readonly property real _canvas: Math.ceil(Math.sqrt(width * width + height * height))
@@ -797,6 +850,7 @@ Item {
                 if (position.speedValid && position.speed >= 0)
                     tm.speedKmh = position.speed < 0.8 ? 0 : Math.round(position.speed * 3.6)
                 if (tm.navigating) tm._updateStep()
+                tm._checkSpeedLimit(position.coordinate)
             }
         }
     }

@@ -70,6 +70,8 @@ Rectangle {
             root.navMap.etaText = "14:32"
             root.navMap.speedKmh = 48
             root.navMap.remainingM = 12000
+            // PREVIEW_LIMIT=<n> shows a posted speed limit (48 km/h > 40 = speeding).
+            if (typeof previewLimit !== "undefined" && previewLimit) root.navMap.speedLimit = parseInt(previewLimit)
             // PREVIEW_EV_PCT=<n> sets the car's charge so stills can show the
             // amber/red arrival states and the low-battery warning.
             var soc = (typeof previewEvPct !== "undefined" && previewEvPct) ? parseInt(previewEvPct) : 72
@@ -579,19 +581,42 @@ Rectangle {
             anchors.right: parent.right; anchors.bottom: parent.bottom
             anchors.margins: root.pad
             width: Math.round(root.unit * 0.11); height: width; radius: width / 2
-            color: root.surface
-            border.width: Math.max(1, Math.round(width * 0.04)); border.color: root.dim
+            // Over the posted limit: the badge turns red.
+            readonly property bool speeding: root.navMap !== null && root.navMap.speedLimit > 0
+                                             && root.navMap.speedKmh > root.navMap.speedLimit
+            color: speeding ? "#e5392f" : root.surface
+            border.width: Math.max(1, Math.round(width * 0.04)); border.color: speeding ? "#e5392f" : root.dim
             Column {
                 anchors.centerIn: parent; spacing: 0
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: root.navMap ? root.navMap.speedKmh : 0
-                    color: root.fg; font.bold: true; font.pixelSize: Math.round(speedBadge.width * 0.4)
+                    color: speedBadge.speeding ? "white" : root.fg
+                    font.bold: true; font.pixelSize: Math.round(speedBadge.width * 0.4)
                 }
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    text: "km/h"; color: root.dim; font.pixelSize: Math.round(speedBadge.width * 0.18)
+                    text: "km/h"; color: speedBadge.speeding ? "#ffe1de" : root.dim
+                    font.pixelSize: Math.round(speedBadge.width * 0.18)
                 }
+            }
+        }
+
+        // posted speed limit (left of the speedometer): a European-style round
+        // sign, white with a red ring. Hidden when the road's limit is unknown.
+        Rectangle {
+            id: limitSign
+            visible: speedBadge.visible && root.navMap.speedLimit > 0
+            anchors.right: speedBadge.left; anchors.rightMargin: root.pad * 0.5
+            anchors.verticalCenter: speedBadge.verticalCenter
+            width: Math.round(speedBadge.width * 0.86); height: width; radius: width / 2
+            color: "white"
+            border.width: Math.round(width * 0.12); border.color: "#e5392f"
+            Text {
+                anchors.centerIn: parent
+                text: root.navMap ? root.navMap.speedLimit : ""
+                color: "#111"; font.bold: true
+                font.pixelSize: Math.round(limitSign.width * (text.length > 2 ? 0.34 : 0.42))
             }
         }
 
