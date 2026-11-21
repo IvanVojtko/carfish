@@ -59,13 +59,27 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
     // Let the car QML drop diagnostics into the durable log (carScreen.log(...)).
     connect(m_screen, &CarScreen::logMessage, this, &Controller::appendLog);
     connect(m_phone, &PhoneManager::log, this, &Controller::appendLog);
-    // Push the saved TomTom traffic key + toggle to the car map, and persist the
-    // toggle when it is flipped from the on-map button.
+    // Push the saved TomTom traffic key + toggle and the map orientation to the car
+    // map, and persist them when they are flipped from the on-map buttons.
     m_screen->setTrafficKey(trafficKey());
     m_screen->setTrafficEnabled(trafficEnabled());
     connect(m_screen, &CarScreen::trafficEnabledChanged, this, [this] {
         if (m_screen->trafficEnabled() != trafficEnabled())
             setTrafficEnabled(m_screen->trafficEnabled());
+    });
+    m_screen->setMapHeadingUp(mapHeadingUp());
+    m_screen->setEvCapacityKwh(batteryCapacityKwh());
+    // Saved places (Home/Work + recent destinations) for the car's search screen.
+    m_screen->loadPlaces(m_settings.value(QStringLiteral("places")).toMap(),
+                         m_settings.value(QStringLiteral("recentPlaces")).toList());
+    connect(m_screen, &CarScreen::placesChanged, this, [this] {
+        m_settings.setValue(QStringLiteral("places"), m_screen->places());
+        m_settings.setValue(QStringLiteral("recentPlaces"), m_screen->recentPlaces());
+        m_settings.sync();
+    });
+    connect(m_screen, &CarScreen::mapHeadingUpChanged, this, [this] {
+        if (m_screen->mapHeadingUp() != mapHeadingUp())
+            setMapHeadingUp(m_screen->mapHeadingUp());
     });
     // Carry settings over from before the rename so an upgrade keeps the user's
     // cert/key paths and chosen media app (the Spotify auto-launch).
@@ -209,9 +223,42 @@ void Controller::setTrafficEnabled(bool on)
     if (on == trafficEnabled())
         return;
     m_settings.setValue(QStringLiteral("trafficEnabled"), on);
+    m_settings.sync(); // write now: the app is often killed rather than quit cleanly
     if (m_screen)
         m_screen->setTrafficEnabled(on);
     emit trafficEnabledChanged();
+}
+
+double Controller::batteryCapacityKwh() const
+{
+    return m_settings.value(QStringLiteral("batteryCapacityKwh"), 0.0).toDouble();
+}
+
+void Controller::setBatteryCapacityKwh(double kwh)
+{
+    kwh = qBound(0.0, kwh, 500.0);
+    if (qFuzzyCompare(kwh + 1.0, batteryCapacityKwh() + 1.0))
+        return;
+    m_settings.setValue(QStringLiteral("batteryCapacityKwh"), kwh);
+    m_settings.sync();
+    if (m_screen)
+        m_screen->setEvCapacityKwh(kwh);
+    emit batteryCapacityKwhChanged();
+}
+
+bool Controller::mapHeadingUp() const
+{
+    return m_settings.value(QStringLiteral("mapHeadingUp"), false).toBool();
+}
+
+void Controller::setMapHeadingUp(bool on)
+{
+    if (on == mapHeadingUp())
+        return;
+    m_settings.setValue(QStringLiteral("mapHeadingUp"), on);
+    m_settings.sync();
+    if (m_screen)
+        m_screen->setMapHeadingUp(on);
 }
 
 void Controller::setAutoStart(bool on)

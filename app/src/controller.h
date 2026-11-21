@@ -38,6 +38,7 @@ class Controller : public QObject
     Q_PROPERTY(bool autoStart READ autoStart WRITE setAutoStart NOTIFY autoStartChanged)
     Q_PROPERTY(QString trafficKey READ trafficKey WRITE setTrafficKey NOTIFY trafficKeyChanged)
     Q_PROPERTY(bool trafficEnabled READ trafficEnabled WRITE setTrafficEnabled NOTIFY trafficEnabledChanged)
+    Q_PROPERTY(double batteryCapacityKwh READ batteryCapacityKwh WRITE setBatteryCapacityKwh NOTIFY batteryCapacityKwhChanged)
 public:
     enum Mode { Wireless = 0, Usb = 1, TcpServer = 2 };
     Q_ENUM(Mode)
@@ -66,6 +67,13 @@ public:
     void setTrafficKey(const QString &key);
     bool trafficEnabled() const;
     void setTrafficEnabled(bool on);
+    // Map orientation chosen with the car map's compass button (false = north-up,
+    // true = heading-up); persisted so it survives restarts like the traffic toggle.
+    bool mapHeadingUp() const;
+    void setMapHeadingUp(bool on);
+    // EV usable battery capacity (kWh), entered by the user; 0 = not set.
+    double batteryCapacityKwh() const;
+    void setBatteryCapacityKwh(double kwh);
 
     void setCarQml(const QUrl &url) { m_carQml = url; }
 
@@ -94,6 +102,7 @@ signals:
     void autoStartChanged();
     void trafficKeyChanged();
     void trafficEnabledChanged();
+    void batteryCapacityKwhChanged();
 
 private:
     void setState(const QString &state);

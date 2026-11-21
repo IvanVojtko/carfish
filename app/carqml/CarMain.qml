@@ -1,4 +1,5 @@
 import QtQuick 2.6
+import QtPositioning 5.0
 
 // The UI projected to the head unit. Plain QtQuick (no Silica): it renders
 // offscreen at the car's resolution (CarScreen sizes this root to the
@@ -28,6 +29,9 @@ Rectangle {
         if (typeof previewNav !== "undefined" && previewNav === "1") {
             root.mapExpanded = true; navPreview.start()
         }
+        if (typeof previewPlaces !== "undefined" && previewPlaces === "1") {
+            root.mapExpanded = true; root.searching = true
+        }
         if (typeof previewQueue !== "undefined" && previewQueue === "1")
             root.showQueue = true
         if (typeof previewHeadingUp !== "undefined" && previewHeadingUp === "1")
@@ -37,7 +41,7 @@ Rectangle {
     // rotates and the compass turns.
     Timer {
         id: hdgPreview; interval: 700
-        onTriggered: if (root.navMap) { root.navMap._dispHeading = 40; root.navMap.headingUp = true; root.navMap.speedKmh = 48 }
+        onTriggered: if (root.navMap) { root.navMap._dispHeading = 40; carScreen.mapHeadingUp = true; root.navMap.speedKmh = 48 }
     }
     // Preview-only: run the destination search once the map has loaded, so a
     // still shows live (distance-sorted) results.
@@ -132,6 +136,20 @@ Rectangle {
     // destination search / navigation (driven by MapPane, id realMap)
     property bool searching: false
     property string searchText: ""
+    // Saved-place picking: "home"/"work" while the search is choosing that
+    // place (the next result tapped is saved instead of navigated to).
+    property string pickPlace: ""
+    onSearchingChanged: if (!searching) pickPlace = ""
+    onPickPlaceChanged: if (root.navMap) root.navMap.geocodeModel = [] // no stale results
+    readonly property bool havePlaces: typeof carScreen !== "undefined" && carScreen
+                                       && carScreen.places !== undefined
+    // Navigate to a saved/recent place {label, lat, lon} and close the search.
+    function goToPlace(pl, bumpRecent) {
+        if (!pl || !root.navMap) return
+        root.navMap.navigateTo(QtPositioning.coordinate(pl.lat, pl.lon), pl.label)
+        if (bumpRecent) carScreen.addRecentPlace(pl.label, pl.lat, pl.lon) // move to the top
+        root.searching = false; root.searchText = ""
+    }
     property bool showQueue: false   // the play-queue / track-list overlay
     readonly property var navMap: (realMap.status === Loader.Ready && realMap.item) ? realMap.item : null
     readonly property bool navigating: navMap ? navMap.navigating : false
@@ -290,6 +308,34 @@ Rectangle {
                     ctx.lineTo(w * 0.16, h * 0.5);
                     ctx.lineTo(w * 0.34, h * 0.70);
                     ctx.stroke();
+                } else if (name === "home") {
+                    ctx.beginPath();
+                    ctx.moveTo(w * 0.16, h * 0.48);
+                    ctx.lineTo(w * 0.5, h * 0.18);
+                    ctx.lineTo(w * 0.84, h * 0.48);
+                    ctx.moveTo(w * 0.26, h * 0.40);
+                    ctx.lineTo(w * 0.26, h * 0.80);
+                    ctx.lineTo(w * 0.74, h * 0.80);
+                    ctx.lineTo(w * 0.74, h * 0.40);
+                    ctx.stroke();
+                    ctx.fillRect(w * 0.43, h * 0.58, w * 0.14, h * 0.22);
+                } else if (name === "work") {
+                    ctx.beginPath();
+                    ctx.rect(w * 0.16, h * 0.34, w * 0.68, h * 0.44);
+                    ctx.moveTo(w * 0.38, h * 0.34);
+                    ctx.lineTo(w * 0.38, h * 0.22);
+                    ctx.lineTo(w * 0.62, h * 0.22);
+                    ctx.lineTo(w * 0.62, h * 0.34);
+                    ctx.moveTo(w * 0.16, h * 0.54);
+                    ctx.lineTo(w * 0.84, h * 0.54);
+                    ctx.stroke();
+                } else if (name === "recent") {
+                    ctx.beginPath();
+                    ctx.arc(w * 0.5, h * 0.5, w * 0.32, 0, 2 * Math.PI);
+                    ctx.moveTo(w * 0.5, h * 0.30);
+                    ctx.lineTo(w * 0.5, h * 0.5);
+                    ctx.lineTo(w * 0.64, h * 0.60);
+                    ctx.stroke();
                 }
             }
         }
@@ -428,7 +474,7 @@ Rectangle {
             property bool on: visible && carScreen.trafficEnabled
             anchors.left: parent.left; anchors.top: parent.top
             anchors.leftMargin: root.pad; anchors.topMargin: mapPane.ctrlTop
-            width: Math.round(root.unit * 0.045); height: width; radius: width * 0.28
+            width: Math.round(root.unit * 0.056); height: width; radius: width * 0.28
             color: on ? root.accent : root.surface
             Canvas {
                 anchors.centerIn: parent
@@ -470,7 +516,7 @@ Rectangle {
             anchors.leftMargin: root.pad
             // sit below the traffic button when it's showing, else at the top control row.
             anchors.topMargin: mapPane.ctrlTop + (trafficBtn.visible ? trafficBtn.height + root.pad : 0)
-            width: Math.round(root.unit * 0.045); height: width; radius: width / 2
+            width: Math.round(root.unit * 0.056); height: width; radius: width / 2
             color: root.surface
             Canvas {
                 id: compassFace
@@ -493,7 +539,8 @@ Rectangle {
             }
             MouseArea {
                 anchors.fill: parent
-                onClicked: if (root.navMap) root.navMap.headingUp = !root.navMap.headingUp
+                onClicked: if (typeof carScreen !== "undefined" && carScreen)
+                               carScreen.mapHeadingUp = !carScreen.mapHeadingUp
             }
         }
 
@@ -1267,6 +1314,12 @@ Rectangle {
 
         readonly property real kbH: height * 0.5
         readonly property real queryH: Math.round(root.unit * 0.11)
+        // The keyboard stays tucked away while the saved-places list is showing
+        // (so the whole list fits); tapping the query line brings it up.
+        property bool kbForced: false
+        readonly property bool kbShown: kbForced || root.searchText.length > 0 || root.pickPlace !== ""
+                                        || !root.havePlaces
+        onVisibleChanged: if (!visible) kbForced = false
 
         // debounce live geocoding as the user types
         Timer {
@@ -1289,7 +1342,15 @@ Rectangle {
                 elide: Text.ElideLeft
                 color: root.searchText.length ? root.fg : root.dim
                 font.pixelSize: parent.height * 0.5
-                text: root.searchText.length ? root.searchText : "Type a destination"
+                text: root.searchText.length ? root.searchText
+                      : root.pickPlace === "home" ? "Search for your home address"
+                      : root.pickPlace === "work" ? "Search for your work address"
+                      : searchOverlay.kbShown ? "Type a destination" : "Tap to type a destination"
+            }
+            MouseArea {
+                anchors.left: parent.left; anchors.right: cancelBtn.left
+                anchors.top: parent.top; anchors.bottom: parent.bottom
+                onClicked: searchOverlay.kbForced = true
             }
             Rectangle {
                 id: cancelBtn
@@ -1297,7 +1358,81 @@ Rectangle {
                 width: parent.height * 1.7; height: parent.height * 0.82; radius: height / 2
                 color: root.surface2
                 Text { anchors.centerIn: parent; color: root.fg; font.pixelSize: parent.height * 0.4; text: "Cancel" }
-                MouseArea { anchors.fill: parent; onClicked: { root.searching = false; root.searchText = "" } }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: {
+                        root.searchText = ""
+                        if (root.pickPlace) root.pickPlace = ""   // back to the places list
+                        else root.searching = false
+                    }
+                }
+            }
+        }
+
+        // --- saved places (shown until the user types): Home, Work, recents ---
+        ListView {
+            id: placesList
+            visible: root.havePlaces && root.searchText.length < 2 && !root.pickPlace
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.top: queryRow.bottom; anchors.topMargin: root.pad
+            anchors.bottom: searchOverlay.kbShown ? keyboard.top : parent.bottom; anchors.bottomMargin: root.pad
+            anchors.leftMargin: root.pad; anchors.rightMargin: root.pad
+            clip: true
+            model: {
+                if (!root.havePlaces) return []
+                var pl = carScreen.places, out = []
+                out.push({ kind: "home", icon: "home", title: "Home", place: pl.home || null })
+                out.push({ kind: "work", icon: "work", title: "Work", place: pl.work || null })
+                var rec = carScreen.recentPlaces || []
+                for (var i = 0; i < rec.length; i++)
+                    out.push({ kind: "recent", icon: "recent", index: i, place: rec[i],
+                               title: rec[i].label.split(",").slice(0, 2).join(",") })
+                return out
+            }
+            delegate: Rectangle {
+                width: placesList.width; height: root.unit * 0.1
+                color: plArea.pressed ? root.surface2 : "transparent"
+                readonly property bool saved: modelData.place !== null
+                Loader {
+                    id: plIcon
+                    anchors.left: parent.left; anchors.leftMargin: root.pad
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.height * 0.5; height: width
+                    sourceComponent: iconPainter
+                    onLoaded: { item.name = modelData.icon; item.col = modelData.kind === "recent" ? root.dim : root.accent }
+                }
+                Column {
+                    anchors.left: plIcon.right; anchors.leftMargin: root.pad
+                    anchors.right: parent.right; anchors.rightMargin: root.pad
+                    anchors.verticalCenter: parent.verticalCenter
+                    Text {
+                        width: parent.width; elide: Text.ElideRight
+                        color: root.fg; font.pixelSize: root.unit * 0.034; font.bold: modelData.kind !== "recent"
+                        text: modelData.title
+                    }
+                    Text {
+                        width: parent.width; elide: Text.ElideRight
+                        color: root.dim; font.pixelSize: root.unit * 0.026
+                        visible: text.length > 0
+                        text: modelData.kind === "recent"
+                              ? modelData.place.label.split(",").slice(2, 4).join(",").trim()
+                              : (saved ? modelData.place.label : "Tap to set")
+                    }
+                }
+                Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.surface2 }
+                MouseArea {
+                    id: plArea
+                    anchors.fill: parent
+                    onClicked: {
+                        if (saved) root.goToPlace(modelData.place, modelData.kind === "recent")
+                        else root.pickPlace = modelData.kind     // Home/Work not set yet: pick it
+                    }
+                    // Hold: change Home/Work, or forget a recent destination.
+                    onPressAndHold: {
+                        if (modelData.kind === "recent") carScreen.removeRecentPlace(modelData.index)
+                        else root.pickPlace = modelData.kind
+                    }
+                }
             }
         }
 
@@ -1306,9 +1441,10 @@ Rectangle {
             id: results
             anchors.left: parent.left; anchors.right: parent.right
             anchors.top: queryRow.bottom; anchors.topMargin: root.pad
-            anchors.bottom: keyboard.top; anchors.bottomMargin: root.pad
+            anchors.bottom: searchOverlay.kbShown ? keyboard.top : parent.bottom; anchors.bottomMargin: root.pad
             anchors.leftMargin: root.pad; anchors.rightMargin: root.pad
             clip: true
+            visible: !placesList.visible
             model: root.navMap ? root.navMap.geocodeModel : null
             delegate: Rectangle {
                 width: results.width; height: root.unit * 0.1
@@ -1334,7 +1470,15 @@ Rectangle {
                     id: resArea
                     anchors.fill: parent
                     onClicked: {
-                        if (root.navMap) root.navMap.navigateTo(modelData.coordinate, modelData.address.text)
+                        var c = modelData.coordinate, label = modelData.address.text
+                        if (root.pickPlace && root.havePlaces) {
+                            // Choosing Home/Work: save it and go back to the places list.
+                            carScreen.setPlace(root.pickPlace, label, c.latitude, c.longitude)
+                            root.pickPlace = ""; root.searchText = ""
+                            return
+                        }
+                        if (root.navMap) root.navMap.navigateTo(c, label)
+                        if (root.havePlaces) carScreen.addRecentPlace(label, c.latitude, c.longitude)
                         root.searching = false; root.searchText = ""
                     }
                 }
@@ -1350,6 +1494,7 @@ Rectangle {
         // --- on-screen QWERTY keyboard ---
         Column {
             id: keyboard
+            visible: searchOverlay.kbShown
             anchors.bottom: parent.bottom; anchors.bottomMargin: root.pad
             anchors.horizontalCenter: parent.horizontalCenter
             width: parent.width - root.pad * 2

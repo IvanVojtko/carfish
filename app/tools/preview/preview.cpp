@@ -23,6 +23,9 @@ class PreviewScreen : public QObject
     Q_PROPERTY(bool nightMode READ nightMode WRITE setNightMode NOTIFY nightModeChanged)
     Q_PROPERTY(QString trafficKey READ trafficKey WRITE setTrafficKey NOTIFY trafficKeyChanged)
     Q_PROPERTY(bool trafficEnabled READ trafficEnabled WRITE setTrafficEnabled NOTIFY trafficEnabledChanged)
+    Q_PROPERTY(bool mapHeadingUp READ mapHeadingUp WRITE setMapHeadingUp NOTIFY mapHeadingUpChanged)
+    Q_PROPERTY(QVariantMap places READ places NOTIFY placesChanged)
+    Q_PROPERTY(QVariantList recentPlaces READ recentPlaces NOTIFY placesChanged)
     Q_PROPERTY(int evLevel READ evLevel NOTIFY energyChanged)
     Q_PROPERTY(int evRange READ evRange NOTIFY energyChanged)
     Q_PROPERTY(bool evElectric READ evElectric NOTIFY energyChanged)
@@ -52,6 +55,38 @@ public:
         m_trafficEnabled = on;
         emit trafficEnabledChanged();
     }
+    bool mapHeadingUp() const { return m_headingUp; }
+    void setMapHeadingUp(bool on)
+    {
+        if (on == m_headingUp)
+            return;
+        m_headingUp = on;
+        emit mapHeadingUpChanged();
+    }
+    // Saved places (in memory only in the preview).
+    static QVariantMap entry(const QString &l, double lat, double lon)
+    {
+        QVariantMap m;
+        m[QStringLiteral("label")] = l; m[QStringLiteral("lat")] = lat; m[QStringLiteral("lon")] = lon;
+        return m;
+    }
+    QVariantMap places() const { return m_places; }
+    QVariantList recentPlaces() const { return m_recent; }
+    Q_INVOKABLE void setPlace(const QString &k, const QString &l, double lat, double lon)
+    { m_places[k] = entry(l, lat, lon); emit placesChanged(); }
+    Q_INVOKABLE void clearPlace(const QString &k) { m_places.remove(k); emit placesChanged(); }
+    Q_INVOKABLE void addRecentPlace(const QString &l, double lat, double lon)
+    { m_recent.prepend(entry(l, lat, lon)); while (m_recent.size() > 8) m_recent.removeLast(); emit placesChanged(); }
+    Q_INVOKABLE void removeRecentPlace(int i)
+    { if (i >= 0 && i < m_recent.size()) { m_recent.removeAt(i); emit placesChanged(); } }
+    void seedPlaces()
+    {
+        m_places[QStringLiteral("home")] = entry(QStringLiteral("Runeberginkatu 5, Etu-Töölö, Helsinki, 00100, Finland"), 60.1736, 24.9283);
+        m_recent << entry(QStringLiteral("Kamppi Shopping Centre, Urho Kekkosen katu 1, Kamppi, Helsinki"), 60.1690, 24.9320)
+                 << entry(QStringLiteral("Helsinki Airport, Lentoasemantie 1, Vantaa, Finland"), 60.3172, 24.9633)
+                 << entry(QStringLiteral("IONITY Kehä III, Kehä III, Vantaa, Finland"), 60.2950, 24.8500);
+        emit placesChanged();
+    }
     Q_INVOKABLE void log(const QString &) {}
     int evLevel() const { return m_evLevel; }
     int evRange() const { return m_evRange; }
@@ -66,12 +101,17 @@ signals:
     void nightModeChanged();
     void trafficKeyChanged();
     void trafficEnabledChanged();
+    void mapHeadingUpChanged();
+    void placesChanged();
     void energyChanged();
 
 private:
     bool m_night = false;
     QString m_trafficKey;
     bool m_trafficEnabled = true;
+    bool m_headingUp = false;
+    QVariantMap m_places;
+    QVariantList m_recent;
     int m_evLevel = -1;
     int m_evRange = -1;
     bool m_evElectric = false;
@@ -164,6 +204,11 @@ int main(int argc, char **argv)
     // PREVIEW_SEARCH_TEXT overrides the query it runs.
     view.rootContext()->setContextProperty(QStringLiteral("previewSearch"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_SEARCH")));
+    // PREVIEW_PLACES=1 seeds sample saved places and opens the search on them.
+    if (!qgetenv("PREVIEW_PLACES").isEmpty())
+        screen.seedPlaces();
+    view.rootContext()->setContextProperty(QStringLiteral("previewPlaces"),
+                                           QString::fromLocal8Bit(qgetenv("PREVIEW_PLACES")));
     view.rootContext()->setContextProperty(QStringLiteral("previewSearchText"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_SEARCH_TEXT")));
     // PREVIEW_NAV=1 runs the no-input nav self-test (shows the turn + arrival bars).

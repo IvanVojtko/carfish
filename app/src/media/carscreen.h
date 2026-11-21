@@ -30,6 +30,14 @@ class CarScreen : public QObject
     // Controller. Both are read by the map QML as carScreen.trafficKey / .trafficEnabled.
     Q_PROPERTY(QString trafficKey READ trafficKey WRITE setTrafficKey NOTIFY trafficKeyChanged)
     Q_PROPERTY(bool trafficEnabled READ trafficEnabled WRITE setTrafficEnabled NOTIFY trafficEnabledChanged)
+    // Map orientation (false = north-up, true = heading-up), toggled by the compass
+    // button on the car map and persisted by the Controller.
+    Q_PROPERTY(bool mapHeadingUp READ mapHeadingUp WRITE setMapHeadingUp NOTIFY mapHeadingUpChanged)
+    // Saved places for the destination search, persisted by the Controller:
+    // places = {home: {label, lat, lon}, work: {...}} (a key is absent when
+    // unset); recentPlaces = newest-first [{label, lat, lon}], at most 8.
+    Q_PROPERTY(QVariantMap places READ places NOTIFY placesChanged)
+    Q_PROPERTY(QVariantList recentPlaces READ recentPlaces NOTIFY placesChanged)
     // Car fuel/energy level from the AAP FUEL sensor (−1 until the car reports it,
     // or when it doesn't expose the sensor). For an EV evElectric is true and
     // evLevel/evRange are the battery state-of-charge % and remaining range (km).
@@ -53,12 +61,26 @@ public:
     void setTrafficKey(const QString &key);
     bool trafficEnabled() const { return m_trafficEnabled; }
     void setTrafficEnabled(bool on);
+    bool mapHeadingUp() const { return m_mapHeadingUp; }
+    void setMapHeadingUp(bool on);
+
+    QVariantMap places() const { return m_places; }
+    QVariantList recentPlaces() const { return m_recentPlaces; }
+    void loadPlaces(const QVariantMap &places, const QVariantList &recents); // from settings, no signal
+    Q_INVOKABLE void setPlace(const QString &kind, const QString &label, double lat, double lon);
+    Q_INVOKABLE void clearPlace(const QString &kind);
+    Q_INVOKABLE void addRecentPlace(const QString &label, double lat, double lon);
+    Q_INVOKABLE void removeRecentPlace(int index);
 
     int evLevel() const { return m_evLevel; }
     int evRange() const { return m_evRange; }
     bool evElectric() const { return m_evElectric; }
     bool evLow() const { return m_evLow; }
     Q_INVOKABLE void setEnergy(int levelPct, int rangeKm, bool electric, bool low);
+    // Usable battery capacity (kWh) the user entered on the phone; AAP never
+    // reports it. 0 = unknown. Used for the cluster battery forecast (Wh).
+    double evCapacityKwh() const { return m_evCapacityKwh; }
+    void setEvCapacityKwh(double kwh) { m_evCapacityKwh = kwh; }
 
     // Touch input from the head unit, already in video pixel coordinates.
     enum TouchAction { Press, Release, Move };
@@ -82,6 +104,8 @@ signals:
     void nightModeChanged();
     void trafficKeyChanged();
     void trafficEnabledChanged();
+    void mapHeadingUpChanged();
+    void placesChanged();
     void energyChanged();
     void logMessage(const QString &line);
 
@@ -100,6 +124,10 @@ private:
     bool m_nightMode = false;
     QString m_trafficKey;
     bool m_trafficEnabled = true;
+    bool m_mapHeadingUp = false;
+    double m_evCapacityKwh = 0;
+    QVariantMap m_places;
+    QVariantList m_recentPlaces;
     int m_evLevel = -1;
     int m_evRange = -1;
     bool m_evElectric = false;

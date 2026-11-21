@@ -1,4 +1,5 @@
 #include "carscreen.h"
+
 #include "navbridge.h"
 
 #include <QCoreApplication>
@@ -14,6 +15,7 @@
 #include <QQuickItem>
 #include <QQuickRenderControl>
 #include <QQuickWindow>
+#include <QtMath>
 
 Q_LOGGING_CATEGORY(lcScreen, "aap.screen")
 
@@ -142,6 +144,70 @@ void CarScreen::setTrafficEnabled(bool on)
         return;
     m_trafficEnabled = on;
     emit trafficEnabledChanged();
+}
+
+static QVariantMap placeEntry(const QString &label, double lat, double lon)
+{
+    QVariantMap m;
+    m[QStringLiteral("label")] = label;
+    m[QStringLiteral("lat")] = lat;
+    m[QStringLiteral("lon")] = lon;
+    return m;
+}
+
+void CarScreen::loadPlaces(const QVariantMap &places, const QVariantList &recents)
+{
+    m_places = places;
+    m_recentPlaces = recents;
+}
+
+void CarScreen::setPlace(const QString &kind, const QString &label, double lat, double lon)
+{
+    if (kind.isEmpty())
+        return;
+    m_places[kind] = placeEntry(label, lat, lon);
+    emit placesChanged();
+}
+
+void CarScreen::clearPlace(const QString &kind)
+{
+    if (m_places.remove(kind))
+        emit placesChanged();
+}
+
+// Newest first, no duplicates (same label, or within ~50 m), at most 8.
+void CarScreen::addRecentPlace(const QString &label, double lat, double lon)
+{
+    QVariantList out;
+    out << placeEntry(label, lat, lon);
+    for (const QVariant &v : m_recentPlaces) {
+        const QVariantMap m = v.toMap();
+        const double dLat = (m.value(QStringLiteral("lat")).toDouble() - lat) * 111320.0;
+        const double dLon = (m.value(QStringLiteral("lon")).toDouble() - lon) * 111320.0
+                            * qCos(qDegreesToRadians(lat));
+        const bool same = m.value(QStringLiteral("label")).toString() == label
+                          || (dLat * dLat + dLon * dLon) < 50.0 * 50.0;
+        if (!same && out.size() < 8)
+            out << m;
+    }
+    m_recentPlaces = out;
+    emit placesChanged();
+}
+
+void CarScreen::removeRecentPlace(int index)
+{
+    if (index < 0 || index >= m_recentPlaces.size())
+        return;
+    m_recentPlaces.removeAt(index);
+    emit placesChanged();
+}
+
+void CarScreen::setMapHeadingUp(bool on)
+{
+    if (m_mapHeadingUp == on)
+        return;
+    m_mapHeadingUp = on;
+    emit mapHeadingUpChanged();
 }
 
 void CarScreen::setEnergy(int levelPct, int rangeKm, bool electric, bool low)

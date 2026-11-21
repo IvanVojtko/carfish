@@ -94,6 +94,30 @@ Page {
                 text: qsTr("Live traffic needs a free TomTom API key (developer.tomtom.com) — OpenStreetMap has no traffic data.")
             }
 
+            SectionHeader { text: qsTr("Electric car") }
+
+            TextField {
+                width: parent.width
+                label: qsTr("Usable battery capacity (kWh)")
+                placeholderText: qsTr("e.g. 88 for a Mach-E extended range")
+                inputMethodHints: Qt.ImhFormattedNumbersOnly
+                validator: DoubleValidator { bottom: 0; top: 500; decimals: 1 }
+                text: controller.batteryCapacityKwh > 0 ? controller.batteryCapacityKwh.toString() : ""
+                onTextChanged: {
+                    var v = parseFloat(text.replace(",", "."))
+                    controller.batteryCapacityKwh = isNaN(v) ? 0 : v
+                }
+            }
+
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * x
+                wrapMode: Text.Wrap
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryColor
+                text: qsTr("Lets the car's instrument cluster show the battery left at arrival. Android Auto doesn't report the pack size, so enter it here. Only used if the car reports its charge level.")
+            }
+
             SectionHeader { text: qsTr("Status") }
 
             Label {
