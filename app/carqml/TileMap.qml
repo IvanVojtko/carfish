@@ -164,41 +164,87 @@ Item {
     // --- geocoding (Nominatim) + routing (OSRM) over plain HTTP. QtLocation's
     // osm plugin fails to load on-device, so we talk to the public OSM services
     // directly; the engine's NAM factory stamps the required User-Agent. ---
-    function search(text) {
-        if (!text || text.length < 2) { geocodeModel = []; return }
-        searching = true
-        // Bias toward where we are: a viewbox around the current position makes
-        // Nominatim prefer nearby places (a preference, not a hard bound, so a
-        // deliberately far destination still shows up), and we then re-sort the
-        // results by distance so a nearby match beats a far-away namesake
-        // instead of some street thousands of km away ranking first.
-        var here = (gps.position.latitudeValid && gps.position.longitudeValid)
-                   ? gps.position.coordinate : QtPositioning.coordinate(centerLat, centerLon)
-        var d = 2.0 // ~200 km half-box around us
-        var vb = (here.longitude - d) + "," + (here.latitude + d) + ","
-               + (here.longitude + d) + "," + (here.latitude - d)
-        var url = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=10"
-                + "&viewbox=" + vb + "&q=" + encodeURIComponent(text)
+    // Two passes: first a tight box (~30 km) around us with bounded=1, then
+    // the wide query (~200 km viewbox as a preference only). Nominatim ranks
+    // by global importance before applying the viewbox, so a wide query for
+    // a shop's name returns ten foreign namesakes and never the local
+    // mall; the bounded local pass finds it. Order: a town/city named exactly
+    // what was typed ("Augsburg"), then local hits in ~3 km distance bands
+    // (Nominatim's relevance within a band, so the mall beats the shops
+    // inside it), then the wide ones nearest-first.
+    property int _geoGen: 0
+    property var _geoLocal: []
+    property double _geoLast: 0               // ms of the last Nominatim search
+    property var _geoPending: null            // request waiting for the 1/s gap
+    Timer {   // Nominatim usage policy: at most one request per second
+        id: geoGap
+        onTriggered: { var r = _geoPending; _geoPending = null; if (r) _geoSend(r.url, r.cb) }
+    }
+    function _geoSend(url, cb) {
+        var wait = _geoLast + 1100 - Date.now()
+        if (wait > 0) {   // a newer request simply replaces a waiting one
+            _geoPending = { url: url, cb: cb }; geoGap.interval = wait; geoGap.restart(); return
+        }
+        _geoLast = Date.now()
         var xhr = new XMLHttpRequest()
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
-            searching = false
-            if (xhr.status !== 200) { mlog("geocode http " + xhr.status); geocodeModel = []; return }
-            try {
-                var arr = JSON.parse(xhr.responseText), out = []
-                for (var i = 0; i < arr.length; i++) {
-                    var c = QtPositioning.coordinate(parseFloat(arr[i].lat), parseFloat(arr[i].lon))
-                    out.push({ address: { text: arr[i].display_name }, coordinate: c,
-                               _dist: here.distanceTo(c), _imp: arr[i].importance || 0 })
-                }
-                // Nearest first; Nominatim's relevance (importance) breaks ties.
-                out.sort(function(a, b) { return (a._dist - b._dist) || (b._imp - a._imp) })
-                geocodeModel = out
-                var near = out.length ? Math.round(out[0]._dist / 1000) : 0
-                mlog("geocode '" + text + "' -> " + out.length + " (nearest " + near + " km)")
-            } catch (e) { mlog("geocode parse err " + e); geocodeModel = [] }
+            if (xhr.status !== 200) { mlog("geocode http " + xhr.status); cb(null); return }
+            try { cb(JSON.parse(xhr.responseText)) }
+            catch (e) { mlog("geocode parse err " + e); cb(null) }
         }
         xhr.open("GET", url); xhr.send()
+    }
+    function _geoBox(here, d) {
+        return (here.longitude - d) + "," + (here.latitude + d) + ","
+             + (here.longitude + d) + "," + (here.latitude - d)
+    }
+    function _geoRows(arr, here) {
+        var out = []
+        for (var i = 0; arr && i < arr.length; i++) {
+            var c = QtPositioning.coordinate(parseFloat(arr[i].lat), parseFloat(arr[i].lon))
+            out.push({ address: { text: arr[i].display_name }, coordinate: c,
+                       _dist: here.distanceTo(c), _imp: arr[i].importance || 0,
+                       _key: arr[i].osm_type + arr[i].osm_id, _rank: i,
+                       _name: (arr[i].name || "").toLowerCase(), _prank: arr[i].place_rank || 30 })
+        }
+        return out
+    }
+    function search(text) {
+        var gen = ++_geoGen
+        if (!text || text.length < 2) { geocodeModel = []; searching = false; _geoPending = null; return }
+        searching = true
+        var here = (gps.position.latitudeValid && gps.position.longitudeValid)
+                   ? gps.position.coordinate : QtPositioning.coordinate(centerLat, centerLon)
+        var q = "&q=" + encodeURIComponent(text)
+        var base = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=10"
+        _geoSend(base + "&bounded=1&viewbox=" + _geoBox(here, 0.3) + q, function(arr) {
+            if (gen !== _geoGen) return
+            _geoLocal = _geoRows(arr, here).sort(function(a, b) {
+                return (Math.floor(a._dist / 3000) - Math.floor(b._dist / 3000)) || (a._rank - b._rank)
+            })
+            geocodeModel = _geoLocal          // show local hits right away
+            _geoSend(base + "&viewbox=" + _geoBox(here, 2.0) + q, function(arr2) {
+                if (gen !== _geoGen) return
+                searching = false
+                var seen = {}, out = _geoLocal.slice()
+                for (var i = 0; i < out.length; i++) seen[out[i]._key] = true
+                var wide = _geoRows(arr2, here).filter(function(r) {
+                    if (seen[r._key]) return false
+                    seen[r._key] = true; return true
+                })
+                wide.sort(function(a, b) { return (a._dist - b._dist) || (b._imp - a._imp) })
+                var want = text.trim().toLowerCase(), top = []
+                out = out.concat(wide).filter(function(r) {
+                    if (r._prank <= 16 && r._name === want) { top.push(r); return false }
+                    return true
+                })
+                geocodeModel = top.concat(out)
+                var near = geocodeModel.length ? Math.round(geocodeModel[0]._dist / 1000) : -1
+                mlog("geocode '" + text + "' -> " + _geoLocal.length + " local + "
+                     + wide.length + " wide" + (near >= 0 ? " (first " + near + " km)" : ""))
+            })
+        })
     }
 
     // --- EV charging stations nearby (OpenStreetMap via Nominatim; no key) ---

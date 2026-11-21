@@ -54,7 +54,14 @@ Rectangle {
     // still shows live (distance-sorted) results.
     Timer {
         id: searchPreview; interval: 700
-        onTriggered: if (root.navMap) root.navMap.search(root.searchText)
+        onTriggered: if (root.navMap) {
+            // PREVIEW_CENTER=lat,lon searches from there (no GPS on the desk).
+            if (typeof previewCenter !== "undefined" && previewCenter) {
+                var ll = previewCenter.split(",")
+                root.navMap.centerLat = parseFloat(ll[0]); root.navMap.centerLon = parseFloat(ll[1])
+            }
+            root.navMap.search(root.searchText)
+        }
     }
     // Preview-only: fill a sample navigation state once the map has loaded, so a
     // still shows the turn card + arrival bar without needing the network.

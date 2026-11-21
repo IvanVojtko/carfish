@@ -219,6 +219,9 @@ int main(int argc, char **argv)
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_CHARGERS")));
     view.rootContext()->setContextProperty(QStringLiteral("previewSearchText"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_SEARCH_TEXT")));
+    // PREVIEW_CENTER=lat,lon moves the map there before the search preview runs.
+    view.rootContext()->setContextProperty(QStringLiteral("previewCenter"),
+                                           QString::fromLocal8Bit(qgetenv("PREVIEW_CENTER")));
     // PREVIEW_NAV=1 runs the no-input nav self-test (shows the turn + arrival bars).
     view.rootContext()->setContextProperty(QStringLiteral("previewNav"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_NAV")));
