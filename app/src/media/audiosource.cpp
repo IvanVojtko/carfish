@@ -82,6 +82,11 @@ AudioSource::AudioSource(QObject *parent)
     // to park the record stream on the microphone, so we re-assert periodically.
     m_watch.setInterval(2000);
     connect(&m_watch, &QTimer::timeout, this, &AudioSource::followActiveSink);
+    // PulseAudio events (stream moved/started/paused) trigger an immediate
+    // re-check; the 2 s watch stays as a fallback.
+    m_recheck.setSingleShot(true);
+    m_recheck.setInterval(60);
+    connect(&m_recheck, &QTimer::timeout, this, &AudioSource::followActiveSink);
 }
 
 AudioSource::~AudioSource()
@@ -108,9 +113,58 @@ bool AudioSource::start(const QString &device, int sampleRate, int channels, QSt
             releasePlayers();
         return false;
     }
-    if (m_loopback)
+    if (m_loopback) {
         m_watch.start();
+        startPulseEvents();
+    }
     return true;
+}
+
+// Watch PulseAudio for stream changes so a capture re-parked onto the mic is
+// silenced and moved back within milliseconds, not at the next 2 s tick.
+void AudioSource::startPulseEvents()
+{
+    stopPulseEvents();
+    m_events = new QProcess(this);
+    connect(m_events, &QProcess::readyReadStandardOutput, this, &AudioSource::onPulseEvents);
+    m_events->start(QStringLiteral("pactl"), {QStringLiteral("subscribe")});
+}
+
+void AudioSource::stopPulseEvents()
+{
+    if (!m_events)
+        return;
+    m_events->disconnect(this);
+    m_events->kill();
+    m_events->waitForFinished(500);
+    delete m_events;
+    m_events = nullptr;
+    m_eventBuf.clear();
+}
+
+void AudioSource::onPulseEvents()
+{
+    if (!m_events)
+        return;
+    m_eventBuf += m_events->readAllStandardOutput();
+    bool relevant = false;
+    int nl;
+    while ((nl = m_eventBuf.indexOf('\n')) >= 0) {
+        const QByteArray line = m_eventBuf.left(nl);
+        m_eventBuf.remove(0, nl + 1);
+        // e.g. "Event 'change' on source-output #42", "Event 'new' on sink-input #7"
+        if (line.contains("source-output")) {
+            relevant = true;
+            // Our own record stream changed (droid may just have moved it onto
+            // the mic): stop forwarding until it is verified again.
+            if (m_captureIdx >= 0 && line.endsWith("#" + QByteArray::number(m_captureIdx)))
+                m_onMonitor = false;
+        } else if (line.contains("sink-input")) {
+            relevant = true;
+        }
+    }
+    if (relevant && !m_recheck.isActive())
+        m_recheck.start();
 }
 
 // Pick (or, as a last resort, create) a null capture sink and return its
@@ -212,11 +266,14 @@ void AudioSource::adoptPlayers()
             sinkName.insert(c.at(0).trimmed().toInt(), c.at(1).trimmed());
     }
 
-    int moved = 0;
+    int moved = 0, playing = 0;
     for (const In &in : inputs) {
         const QString name = sinkName.value(in.sink.toInt(), in.sink);
-        if (name == m_captureSink)
+        if (name == m_captureSink) {
+            if (!in.corked)
+                ++playing;
             continue; // already captured
+        }
         const bool onMediaSink = name.contains(QLatin1String("deep_buffer"))
             || name.contains(QLatin1String("primary_output"));
         if (!in.player && !(onMediaSink && !in.corked))
@@ -224,9 +281,12 @@ void AudioSource::adoptPlayers()
         if (QProcess::execute(QStringLiteral("pactl"),
                               {QStringLiteral("move-sink-input"), QString::number(in.idx), m_captureSink}) == 0) {
             ++moved;
+            if (!in.corked)
+                ++playing;
             qCInfo(lcAudio) << "adopted media stream" << in.idx << in.app.trimmed() << "->" << m_captureSink;
         }
     }
+    m_playingInputs = playing;
     if (moved)
         emit captureChanged(m_device);
 }
@@ -315,11 +375,13 @@ bool AudioSource::buildPipeline(const QString &src, QString *error)
 // by our unique client-name; droid otherwise parks every record stream on the mic.
 void AudioSource::moveCaptureToMonitor()
 {
-    if (!m_pipeline || m_device.isEmpty())
+    if (!m_pipeline || m_device.isEmpty()) {
+        m_onMonitor = false;
         return;
+    }
     const int target = sourceIndexByName(m_device);
     int idx = -1, curSource = -1, moved = 0;
-    bool found = false;
+    bool found = false, verified = false;
     for (const QString &raw : pactl({QStringLiteral("list"), QStringLiteral("source-outputs")})) {
         const QString l = raw.trimmed();
         if (l.startsWith(QLatin1String("Source Output #"))) {
@@ -330,17 +392,22 @@ void AudioSource::moveCaptureToMonitor()
         } else if (idx >= 0 && l.startsWith(QLatin1String("application.name = "))
                    && l.contains(QLatin1String(kClientName))) {
             found = true;
+            m_captureIdx = idx;
             // Only move when it is not already on the target monitor: a routine
             // re-assert of an already-correct stream would needlessly re-route it
             // (and could glitch the audio). When the monitor's index is unknown,
             // move anyway to be safe.
             if (target < 0 || curSource != target) {
-                QProcess::execute(QStringLiteral("pactl"),
+                const int rc = QProcess::execute(QStringLiteral("pactl"),
                                   {QStringLiteral("move-source-output"), QString::number(idx), m_device});
                 ++moved;
+                verified = (rc == 0);
+            } else {
+                verified = true;
             }
         }
     }
+    m_onMonitor = verified;
     if (moved) {
         qCInfo(lcAudio) << "forced capture onto" << m_device;
         emit captureChanged(m_device);
@@ -369,6 +436,8 @@ void AudioSource::followActiveSink()
 void AudioSource::stop()
 {
     m_watch.stop();
+    m_recheck.stop();
+    stopPulseEvents();
     teardownPipeline();
     if (m_loopback)
         releasePlayers();
@@ -377,6 +446,8 @@ void AudioSource::stop()
 
 void AudioSource::teardownPipeline()
 {
+    m_onMonitor = false;
+    m_captureIdx = -1;
     if (!m_pipeline)
         return;
     gst_element_set_state(m_pipeline, GST_STATE_NULL);
@@ -404,5 +475,15 @@ int AudioSource::onNewSample(GstAppSink *sink, void *self)
 
 void AudioSource::handleChunk(const QByteArray &data, quint64 timestampUs)
 {
-    emit pcm(data, timestampUs);
+    // Loopback mode: only real media may reach the car. Until our capture is
+    // verified on the monitor (droid starts it on the mic and can move it back
+    // there later), or when nothing is playing into the capture sink, send
+    // silence instead -- same size, so the stream timing is unchanged.
+    const bool pass = !m_loopback || (m_onMonitor && m_playingInputs > 0);
+    if (pass != !m_gated) {
+        m_gated = !pass;
+        qCInfo(lcAudio) << (pass ? "media audio: forwarding" : "media audio: muted")
+                        << "(on monitor:" << m_onMonitor << ", playing streams:" << m_playingInputs << ")";
+    }
+    emit pcm(pass ? data : QByteArray(data.size(), '\0'), timestampUs);
 }

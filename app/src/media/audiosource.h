@@ -7,6 +7,7 @@
 
 typedef struct _GstElement GstElement;
 typedef struct _GstAppSink GstAppSink;
+class QProcess;
 
 // Captures PCM from a PulseAudio monitor source and hands out fixed size
 // chunks for one AAP audio channel (media: 48 kHz stereo, guidance/system:
@@ -43,11 +44,14 @@ private slots:
     // playing and switch the capture to it (e.g. Spotify starts on deep_buffer
     // after the session is already up).
     void followActiveSink();
+    void onPulseEvents();    // `pactl subscribe` output: react to stream changes at once
 
 private:
     static int onNewSample(GstAppSink *sink, void *self);
     bool buildPipeline(const QString &src, QString *error);
     void moveCaptureToMonitor();   // force our capture off the mic onto m_device
+    void startPulseEvents();
+    void stopPulseEvents();
     void teardownPipeline();
 
     // Loopback mode (reverse-engineered from cargadgetd):
@@ -63,4 +67,15 @@ private:
     int m_sampleRate = 0;
     int m_channels = 0;
     QTimer m_watch;          // re-adopts new media streams + re-pins the capture
+    // Mic-leak guard: audio goes to the car only while our record stream is
+    // confirmed on the capture monitor AND a media stream is actually playing
+    // into the capture sink; otherwise we send silence. droid parks record
+    // streams on the microphone, so an unverified capture may be the mic.
+    bool m_onMonitor = false;
+    int m_captureIdx = -1;     // our PulseAudio source-output index
+    int m_playingInputs = 0;   // uncorked streams on the capture sink
+    bool m_gated = true;       // last state, for logging transitions
+    QProcess *m_events = nullptr;       // long-running `pactl subscribe`
+    QByteArray m_eventBuf;
+    QTimer m_recheck;          // debounced re-check after PulseAudio events
 };
