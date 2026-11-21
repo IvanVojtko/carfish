@@ -7,6 +7,9 @@
 #   app/tools/run_sim.sh --preset small      # 800x480, no margins
 #   app/tools/run_sim.sh --res 1280x720 --margins 0x0
 #
+# SIM_AUDIO=none app/tools/run_sim.sh  runs without media audio (the default
+# loopback capture moves this PC's player streams into a capture sink).
+#
 # A window shows the projected car UI; click/drag to send touch, play audio on
 # this PC to hear it come back through the simulator. Esc or q quits.
 #
@@ -35,7 +38,7 @@ fi
 echo "Starting the phone app (TCP server on :5277) ..."
 QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}" "$APP" --headless --mode tcp-server \
     --cert "$CERTDIR/cert.pem" --key "$CERTDIR/key.pem" \
-    --car-qml "$ROOT/app/carqml/CarMain.qml" &
+    --car-qml "$ROOT/app/carqml/CarMain.qml" ${SIM_AUDIO:+--audio-device "$SIM_AUDIO"} &
 APPPID=$!
 trap 'kill $APPPID 2>/dev/null' EXIT INT TERM
 sleep 2

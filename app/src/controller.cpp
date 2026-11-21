@@ -474,6 +474,10 @@ void Controller::startSession(Transport *transport)
     cfg.certPath = certPath();
     cfg.keyPath = keyPath();
     cfg.carQml = m_carQml;
+    if (m_audioDevice == QLatin1String("none"))
+        cfg.mediaAudio = false;
+    else if (!m_audioDevice.isEmpty())
+        cfg.audioDevice = m_audioDevice;
     m_session = new aap::Session(transport, m_screen, cfg, this);
     connect(m_session.data(), &aap::Session::stateChanged, this, &Controller::setState);
     connect(m_session.data(), &aap::Session::logMessage, this, &Controller::appendLog);

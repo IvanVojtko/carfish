@@ -76,6 +76,10 @@ public:
     void setBatteryCapacityKwh(double kwh);
 
     void setCarQml(const QUrl &url) { m_carQml = url; }
+    // PulseAudio source for car media audio ("" = default loopback capture,
+    // "none" = no media audio). For the desktop simulator, so a test run doesn't
+    // reroute this PC's players.
+    void setAudioDevice(const QString &dev) { m_audioDevice = dev; }
 
     Q_INVOKABLE void start(int mode);
     Q_INVOKABLE void stop();
@@ -126,6 +130,7 @@ private:
     QString m_state;
     QString m_certStatus;
     QStringList m_log;
+    QString m_audioDevice;
     QUrl m_carQml = QUrl::fromLocalFile(QStringLiteral("/usr/share/carfish/carqml/CarMain.qml"));
     CarScreen *m_screen;
     QQmlNetworkAccessManagerFactory *m_namFactory = nullptr; // sets the OSM User-Agent

@@ -26,6 +26,9 @@ static int runHeadless(QGuiApplication &app)
     p.addOption({ QStringLiteral("cert"), QStringLiteral("PEM certificate chain."), QStringLiteral("file") });
     p.addOption({ QStringLiteral("key"), QStringLiteral("PEM private key."), QStringLiteral("file") });
     p.addOption({ QStringLiteral("car-qml"), QStringLiteral("QML scene projected to the car."), QStringLiteral("file") });
+    p.addOption({ QStringLiteral("audio-device"),
+                  QStringLiteral("PulseAudio source for car media audio, or \"none\" (default: loopback capture)."),
+                  QStringLiteral("source") });
     p.addOption({ QStringLiteral("preview"),
                   QStringLiteral("Render the car UI to ~/carfish-preview.png (no car).") });
     p.addOption({ QStringLiteral("preview-size"),
@@ -39,6 +42,8 @@ static int runHeadless(QGuiApplication &app)
         controller.setCertPath(p.value(QStringLiteral("cert")));
     if (p.isSet(QStringLiteral("key")))
         controller.setKeyPath(p.value(QStringLiteral("key")));
+    if (p.isSet(QStringLiteral("audio-device")))
+        controller.setAudioDevice(p.value(QStringLiteral("audio-device")));
     if (p.isSet(QStringLiteral("car-qml")))
         controller.setCarQml(QUrl::fromLocalFile(p.value(QStringLiteral("car-qml"))));
 

@@ -8,15 +8,17 @@
 
 namespace util {
 
-static QString nameField(X509_NAME *name, int nid)
+// const-correct for OpenSSL 4 (getters return const) while still building
+// against the device's older OpenSSL, whose get_index_by_NID takes non-const.
+static QString nameField(const X509_NAME *name, int nid)
 {
     if (!name)
         return QString();
-    const int i = X509_NAME_get_index_by_NID(name, nid, -1);
+    const int i = X509_NAME_get_index_by_NID(const_cast<X509_NAME *>(name), nid, -1);
     if (i < 0)
         return QString();
-    X509_NAME_ENTRY *e = X509_NAME_get_entry(name, i);
-    ASN1_STRING *d = X509_NAME_ENTRY_get_data(e);
+    const X509_NAME_ENTRY *e = X509_NAME_get_entry(name, i);
+    const ASN1_STRING *d = X509_NAME_ENTRY_get_data(e);
     unsigned char *utf8 = nullptr;
     const int len = ASN1_STRING_to_UTF8(&utf8, d);
     QString s = len > 0 ? QString::fromUtf8(reinterpret_cast<char *>(utf8), len) : QString();
@@ -25,7 +27,7 @@ static QString nameField(X509_NAME *name, int nid)
     return s;
 }
 
-static QString nameOneline(X509_NAME *name)
+static QString nameOneline(const X509_NAME *name)
 {
     const QString cn = nameField(name, NID_commonName);
     const QString o = nameField(name, NID_organizationName);
