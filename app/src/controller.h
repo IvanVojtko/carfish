@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QObject>
 #include <QPointer>
 #include <QSettings>
@@ -22,6 +23,9 @@ class WirelessSetup;
 namespace aap { class Session; }
 
 // Glue between the phone UI and the projection pipeline.
+class QNetworkAccessManager;
+class QNetworkReply;
+
 class Controller : public QObject
 {
     Q_OBJECT
@@ -131,6 +135,15 @@ private:
     QString m_certStatus;
     QStringList m_log;
     QString m_audioDevice;
+    // Now playing for the car's own screens (MediaPlaybackStatusService).
+    void pushMediaStatus();
+    void pushMediaMetadata();
+    void loadCoverArt(const QString &url);
+    void setCoverArt(const QImage &img);
+    QString m_coverUrl;          // artUrl the current m_coverPng belongs to
+    QByteArray m_coverPng;       // <= 256x256 PNG for the car
+    QNetworkAccessManager *m_net = nullptr;
+    QPointer<QNetworkReply> m_coverReply;
     QUrl m_carQml = QUrl::fromLocalFile(QStringLiteral("/usr/share/carfish/carqml/CarMain.qml"));
     CarScreen *m_screen;
     QQmlNetworkAccessManagerFactory *m_namFactory = nullptr; // sets the OSM User-Agent

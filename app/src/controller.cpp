@@ -17,11 +17,15 @@
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QDBusObjectPath>
+#include <QBuffer>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QImage>
 #include <QLoggingCategory>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QQmlEngine>
 #include <QStandardPaths>
 #include <QStringList>
@@ -506,6 +510,13 @@ void Controller::startSession(Transport *transport)
     connect(m_session.data(), &aap::Session::phoneChannelReady, m_session.data(), pushCall);
     connect(m_session.data(), &aap::Session::phoneAnswer, m_phone, &PhoneManager::answer);
     connect(m_session.data(), &aap::Session::phoneReject, m_phone, &PhoneManager::hangup);
+    // Now playing -> the car's own screens (when it advertises the service; the
+    // session caches and replays once the channel opens, so push right away).
+    connect(m_mpris, &MprisController::changed, m_session.data(), [this] {
+        pushMediaMetadata();
+        pushMediaStatus();
+    });
+    connect(m_mpris, &MprisController::positionChanged, m_session.data(), [this] { pushMediaStatus(); });
     connect(m_session.data(), &aap::Session::finished, this, [this](const QString &reason) {
         appendLog(tr("Session ended: %1").arg(reason));
         if (m_mode == Wireless && m_running && m_wireless) {
@@ -524,6 +535,9 @@ void Controller::startSession(Transport *transport)
     appendLog(m_mpris->hasPlayer()
                   ? tr("media backend: %1 — %2").arg(m_mpris->title(), m_mpris->artist())
                   : tr("media backend: no MPRIS player yet"));
+
+    pushMediaMetadata();
+    pushMediaStatus();
 
     appendLog(tr("Starting session over %1").arg(transport->describe()));
     m_session->start();
@@ -614,4 +628,74 @@ void Controller::appendLog(const QString &line)
     while (m_log.size() > kMaxLogLines)
         m_log.removeFirst();
     emit logChanged();
+}
+
+// ------------------------------------------------------------ now playing (car)
+
+void Controller::pushMediaStatus()
+{
+    if (!m_session)
+        return;
+    // MediaPlaybackStatus.State: STOPPED 1, PLAYING 2, PAUSED 3.
+    const int state = !m_mpris->hasPlayer() ? 1 : m_mpris->playing() ? 2 : 3;
+    m_session->updateMediaStatus(state, m_mpris->playerName(), int(m_mpris->position()));
+}
+
+void Controller::pushMediaMetadata()
+{
+    if (!m_session)
+        return;
+    if (m_mpris->artUrl() != m_coverUrl)
+        loadCoverArt(m_mpris->artUrl()); // async for http; re-pushes when done
+    m_session->updateMediaMetadata(m_mpris->title(), m_mpris->artist(), m_mpris->album(),
+                                   m_coverPng, int(m_mpris->duration()));
+}
+
+void Controller::loadCoverArt(const QString &url)
+{
+    m_coverUrl = url;
+    m_coverPng.clear();
+    if (m_coverReply)
+        m_coverReply->abort();
+    if (url.isEmpty())
+        return;
+    const QUrl u = QUrl::fromUserInput(url);
+    if (u.isLocalFile()) {
+        setCoverArt(QImage(u.toLocalFile()));
+        return;
+    }
+    if (u.scheme() != QLatin1String("http") && u.scheme() != QLatin1String("https"))
+        return;
+    if (!m_net)
+        m_net = new QNetworkAccessManager(this);
+    QNetworkReply *reply = m_net->get(QNetworkRequest(u));
+    m_coverReply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, url] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError || url != m_coverUrl)
+            return;
+        setCoverArt(QImage::fromData(reply->readAll()));
+        pushMediaMetadata();
+    });
+}
+
+// The car takes a PNG of at most 256x256 (Gearhead rejects anything else).
+// Shrink further if the PNG is large, to keep the message light.
+void Controller::setCoverArt(const QImage &img)
+{
+    m_coverPng.clear();
+    if (img.isNull())
+        return;
+    for (int side : { 256, 192, 128 }) {
+        const QImage scaled = (img.width() > side || img.height() > side)
+                ? img.scaled(side, side, Qt::KeepAspectRatio, Qt::SmoothTransformation) : img;
+        QByteArray png;
+        QBuffer buf(&png);
+        buf.open(QIODevice::WriteOnly);
+        if (!scaled.save(&buf, "PNG"))
+            return;
+        m_coverPng = png;
+        if (png.size() <= 64 * 1024)
+            break;
+    }
 }

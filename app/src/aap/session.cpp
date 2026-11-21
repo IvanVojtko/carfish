@@ -434,6 +434,10 @@ void Session::onServiceDiscovery(const QByteArray &body)
             // push call state (PhoneStatus) onto it and receive answer/reject.
             m_channels.insert(ch, ChannelInfo{Kind::PhoneStatus});
             log(tr("head unit can show calls in Android Auto (phone-status service)"));
+        } else if (svc.has_media_playback_service() && m_mediaStatusChannel < 0) {
+            // The car shows now playing on its own screens (cluster/native UI).
+            m_channels.insert(ch, ChannelInfo{Kind::MediaStatus});
+            log(tr("head unit shows now playing (media playback status service)"));
         }
     }
 
@@ -536,6 +540,12 @@ void Session::onChannel(ChannelInfo &ch, quint8 channel, const Message &msg)
         else
             qCInfo(lcAap) << "unhandled phone-status message" << hex << id;
         break;
+    case Kind::MediaStatus:
+        if (id == MEDIA_PLAYBACK_INPUT)
+            onMediaPlaybackInput(body);
+        else
+            qCInfo(lcAap) << "unhandled media-playback message" << hex << id;
+        break;
     }
 }
 
@@ -558,6 +568,87 @@ void Session::onPhoneStatusInput(const QByteArray &body)
         break;
     default:
         break;
+    }
+}
+
+// Cluster buttons while the car shows our now playing: same action values as
+// InstrumentClusterInput. LEFT/RIGHT skip tracks, ENTER toggles play/pause.
+void Session::onMediaPlaybackInput(const QByteArray &body)
+{
+    MediaPlaybackInput in;
+    if (!parse(in, body))
+        return;
+    log(tr("media playback input from car: action %1").arg(in.action()));
+    switch (in.action()) {
+    case 3: emit mediaKey(QStringLiteral("prev")); break;
+    case 4: emit mediaKey(QStringLiteral("next")); break;
+    case 5: emit mediaKey(QStringLiteral("play-pause")); break;
+    default: break;
+    }
+}
+
+void Session::updateMediaStatus(int state, const QString &source, int positionSec)
+{
+    if (state == m_mpState && source == m_mpSource && positionSec == m_mpPosition)
+        return;
+    const bool stateChanged = state != m_mpState;
+    m_mpState = state;
+    m_mpSource = source;
+    m_mpPosition = qMax(0, positionSec);
+    sendMediaStatus();
+    if (stateChanged && m_mediaStatusChannel >= 0)
+        log(tr("now playing -> car: state %1 (%2)").arg(state).arg(source));
+}
+
+void Session::updateMediaMetadata(const QString &title, const QString &artist, const QString &album,
+                                  const QByteArray &art, int durationSec)
+{
+    if (title == m_mpTitle && artist == m_mpArtist && album == m_mpAlbum && art == m_mpArt
+        && durationSec == m_mpDuration)
+        return;
+    m_mpTitle = title;
+    m_mpArtist = artist;
+    m_mpAlbum = album;
+    m_mpArt = art;
+    m_mpDuration = qMax(0, durationSec);
+    m_mpMetaLogged = false;
+    sendMediaMetadata();
+}
+
+void Session::sendMediaStatus()
+{
+    if (m_mediaStatusChannel < 0 || m_mpState == 0)
+        return;
+    MediaPlaybackStatus st;
+    st.set_state(MediaPlaybackStatus::State(m_mpState));
+    if (!m_mpSource.isEmpty())
+        st.set_media_source(m_mpSource.toStdString());
+    st.set_playback_seconds(uint32_t(m_mpPosition));
+    st.set_shuffle(false);
+    st.set_repeat(false);
+    st.set_repeat_one(false);
+    send(quint8(m_mediaStatusChannel), MEDIA_PLAYBACK_STATUS, st.SerializeAsString());
+}
+
+void Session::sendMediaMetadata()
+{
+    if (m_mediaStatusChannel < 0 || (m_mpTitle.isEmpty() && m_mpArtist.isEmpty()))
+        return;
+    MediaPlaybackMetadata md;
+    md.set_song(m_mpTitle.toStdString());
+    if (!m_mpArtist.isEmpty())
+        md.set_artist(m_mpArtist.toStdString());
+    if (!m_mpAlbum.isEmpty())
+        md.set_album(m_mpAlbum.toStdString());
+    if (!m_mpArt.isEmpty())
+        md.set_album_art(m_mpArt.constData(), size_t(m_mpArt.size()));
+    md.set_duration_seconds(uint32_t(m_mpDuration));
+    md.set_rating(0);
+    send(quint8(m_mediaStatusChannel), MEDIA_PLAYBACK_METADATA, md.SerializeAsString());
+    if (!m_mpMetaLogged) {
+        m_mpMetaLogged = true;
+        log(tr("now playing -> car: %1 — %2 (%3 s%4)").arg(m_mpTitle, m_mpArtist).arg(m_mpDuration)
+                .arg(m_mpArt.isEmpty() ? QString() : tr(", %1-byte cover").arg(m_mpArt.size())));
     }
 }
 
@@ -658,6 +749,12 @@ void Session::onChannelOpened(ChannelInfo &ch, quint8 channel)
         m_phoneStatusChannel = channel;
         log(tr("phone-status channel ready (calls will show in Android Auto)"));
         emit phoneChannelReady();
+        break;
+    case Kind::MediaStatus:
+        m_mediaStatusChannel = channel;
+        log(tr("media playback status channel ready (now playing on the car's screens)"));
+        sendMediaMetadata();
+        sendMediaStatus();
         break;
     }
 }

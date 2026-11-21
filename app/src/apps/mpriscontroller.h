@@ -40,6 +40,8 @@ public:
     QString artist() const { return m_artist; }
     QString album() const { return m_album; }
     QString artUrl() const { return m_artUrl; }
+    // Short name of the active player ("spotify" from org.mpris.MediaPlayer2.spotify).
+    QString playerName() const;
     double position() const { return double(m_positionUs) / 1e6; }
     double duration() const { return double(m_lengthUs) / 1e6; }
     double progress() const { return m_lengthUs > 0 ? double(m_positionUs) / double(m_lengthUs) : 0.0; }

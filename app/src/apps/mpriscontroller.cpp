@@ -330,6 +330,16 @@ void MprisController::next() { call(QStringLiteral("Next")); }
 void MprisController::previous() { call(QStringLiteral("Previous")); }
 void MprisController::stop() { call(QStringLiteral("Stop")); }
 
+QString MprisController::playerName() const
+{
+    QString n = m_service;
+    n.remove(QStringLiteral("org.mpris.MediaPlayer2."));
+    const int inst = n.indexOf(QLatin1String(".instance"));
+    if (inst > 0)
+        n.truncate(inst);
+    return n;
+}
+
 void MprisController::handleMediaKey(const QString &action)
 {
     if (action.startsWith(QLatin1String("play-pause")))

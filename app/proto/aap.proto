@@ -273,10 +273,48 @@ message Service {
     optional InputSourceService input_source_service = 4;
     optional MediaSourceService media_source_service = 5;
     optional NavigationStatusService navigation_status_service = 8;
+    optional MediaPlaybackStatusService media_playback_service = 9;
     optional PhoneStatusService phone_status_service = 10;
-    // 6 bluetooth, 7 radio, 9 media playback status,
+    // 6 bluetooth, 7 radio,
     // 11 media browser, 12 vendor extension, 13 notification,
     // 14 wifi projection: not used yet.
+}
+
+// Now playing for the car's own screens (cluster / native media display). The
+// HU advertises this (Service field 9); the phone pushes playback state and track
+// metadata, and the HU may send cluster button presses back. Layout from
+// Gearhead's jnv/jja (messages xxu/xxs/xxf).
+message MediaPlaybackStatusService {}
+
+enum MediaPlaybackMessage {
+    MEDIA_PLAYBACK_STATUS = 32769;   // 0x8001 phone -> HU
+    MEDIA_PLAYBACK_INPUT = 32770;    // 0x8002 HU -> phone
+    MEDIA_PLAYBACK_METADATA = 32771; // 0x8003 phone -> HU
+}
+
+message MediaPlaybackStatus {
+    enum State { UNKNOWN_STATE = 0; STOPPED = 1; PLAYING = 2; PAUSED = 3; }
+    optional State state = 1;
+    optional string media_source = 2;     // player app name
+    optional uint32 playback_seconds = 3;
+    optional bool shuffle = 4;
+    optional bool repeat = 5;
+    optional bool repeat_one = 6;
+}
+
+message MediaPlaybackMetadata {
+    optional string song = 1;
+    optional string artist = 2;
+    optional string album = 3;
+    optional bytes album_art = 4;         // PNG, at most 256x256 (Gearhead enforces)
+    optional string playlist = 5;
+    optional uint32 duration_seconds = 6;
+    optional int32 rating = 7;
+}
+
+// Same 0..7 action values as InstrumentClusterInput (LEFT 3, RIGHT 4, ENTER 5...).
+message MediaPlaybackInput {
+    optional int32 action = 1;
 }
 
 // Phone/telephony status. The HU advertises this service when it can show the

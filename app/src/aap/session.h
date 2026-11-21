@@ -59,6 +59,14 @@ public:
     // has advertised + opened its phone-status channel.
     void updateCall(int state, const QString &number, const QString &name);
 
+    // Now playing for the car's own screens (cluster / native media display),
+    // when the HU advertises MediaPlaybackStatusService. state is a
+    // MediaPlaybackStatus::State value; art is a PNG of at most 256x256 (or
+    // empty). Values are cached and replayed once the channel opens.
+    void updateMediaStatus(int state, const QString &source, int positionSec);
+    void updateMediaMetadata(const QString &title, const QString &artist, const QString &album,
+                             const QByteArray &art, int durationSec);
+
 signals:
     void stateChanged(const QString &state);
     void logMessage(const QString &line);
@@ -79,7 +87,7 @@ signals:
 private:
     enum class Phase { WaitVersion, Handshake, WaitAuth, Discovery, Running, Closed };
 
-    enum class Kind { Video, MediaAudio, Input, Sensor, Mic, Nav, PhoneStatus };
+    enum class Kind { Video, MediaAudio, Input, Sensor, Mic, Nav, PhoneStatus, MediaStatus };
     struct VideoMode {
         QSize size;
         QRect contentRect; // visible part after the HU crops its margins
@@ -117,6 +125,9 @@ private:
     void onVideoFocus(ChannelInfo &ch, quint8 channel, const QByteArray &body);
     void onInput(const ChannelInfo &ch, const QByteArray &body);
     void onPhoneStatusInput(const QByteArray &body);
+    void onMediaPlaybackInput(const QByteArray &body);
+    void sendMediaStatus();
+    void sendMediaMetadata();
     void onKeyEvent(const QByteArray &body);
     void dispatchKey(quint32 keycode, bool down, bool longpress);
     void dispatchRelative(quint32 keycode, int delta); // rotary/knob/scroll steps
@@ -169,6 +180,15 @@ private:
     int m_micChannel = -1;
     int m_navChannel = -1;
     int m_phoneStatusChannel = -1;
+    // Media playback status (now playing on the car's own screens).
+    int m_mediaStatusChannel = -1;
+    int m_mpState = 0;
+    QString m_mpSource;
+    int m_mpPosition = 0;
+    QString m_mpTitle, m_mpArtist, m_mpAlbum;
+    QByteArray m_mpArt;
+    int m_mpDuration = 0;
+    bool m_mpMetaLogged = false;
     QSet<int> m_sensorsAvailable; // sensor types the head unit advertised
     bool m_evCar = false;          // car advertised FUEL_TYPE_ELECTRIC
     int m_navMinIntervalMs = 1000; // rate floor the head unit advertises

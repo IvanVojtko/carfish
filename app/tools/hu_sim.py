@@ -58,6 +58,8 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
         self.audio_session = None
         self.media_audio_channel = None
         self.nav_channel = None          # instrument-cluster nav (service id 6)
+        self.np_channel = None           # now playing (media playback status, service id 9)
+        self.np_last = None
 
         # H.264 decoder: Annex-B in, raw BGR frames out (low latency).
         # Note: -fflags nobuffer / -flags low_delay stop the raw-h264 demuxer from
@@ -137,8 +139,11 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
         nav.navigation_status_service.minimum_interval_ms = 1000
         nav.navigation_status_service.type = 2
 
+        # Now playing on the car's own screens (media playback status).
+        r.services.add(id=9).media_playback_service.SetInParent()
+
         print(f"HU: advertising video {self.w}x{self.h} margins {self.margin_w}x{self.margin_h}, "
-              f"touch {self.touch_w}x{self.touch_h}, media audio 48k stereo, cluster nav")
+              f"touch {self.touch_w}x{self.touch_h}, media audio 48k stereo, cluster nav, now playing")
         return r.SerializeToString()
 
     def start_audio(self):
@@ -188,11 +193,16 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
         if ch == self.nav_channel and mid != 7:
             self._on_nav(mid, body)
             return
+        if ch == self.np_channel and mid != 7:
+            self._on_now_playing(mid, body)
+            return
         if mid == 7 and flags & fake_hu.CONTROL:
             req = pb.ChannelOpenRequest.FromString(body)
             self.send(ch, 8, pb.ChannelOpenResponse(status=0).SerializeToString(), control=True)
             if req.service_id == 5:
                 self.media_audio_channel = ch
+            elif req.service_id == 9:
+                self.np_channel = ch
             elif req.service_id == 6:
                 self.nav_channel = ch
                 # Tell the phone the cluster wants guidance (NAV_STATUS_START).
@@ -232,6 +242,31 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
             self.send(3, 0x8002, pb.SensorResponse(status=0).SerializeToString())
         elif mid == 0x8005 and ch == 4:  # MICROPHONE_REQUEST
             self.send(4, 0x8006, pb.MicrophoneResponse(status=0, session_id=self.mic_session).SerializeToString())
+
+    # --- now playing: print what the phone shows on the car's own screens ------
+    def _on_now_playing(self, mid, body):
+        pb = self.pb
+        try:
+            if mid == 0x8001:
+                st = pb.MediaPlaybackStatus.FromString(body)
+                name = {1: "STOPPED", 2: "PLAYING", 3: "PAUSED"}.get(st.state, st.state)
+                key = (name, st.media_source)
+                if key != self.np_last:  # position ticks every second; print changes
+                    self.np_last = key
+                    print(f"NOW PLAYING: {name} source='{st.media_source}' at {st.playback_seconds}s")
+            elif mid == 0x8003:
+                md = pb.MediaPlaybackMetadata.FromString(body)
+                art = md.album_art
+                info = ""
+                if art:
+                    w, h = int.from_bytes(art[16:20], "big"), int.from_bytes(art[20:24], "big")
+                    info = f", cover {len(art)} B {'PNG' if art[:4] == b'\x89PNG' else 'NOT PNG'} {w}x{h}"
+                print(f"NOW PLAYING: '{md.song}' by '{md.artist}' on '{md.album}' "
+                      f"({md.duration_seconds}s{info})")
+            else:
+                print(f"NOW PLAYING: unhandled message {hex(mid)}")
+        except Exception as e:
+            print(f"NOW PLAYING: decode error on {hex(mid)}: {e}")
 
     # --- instrument cluster: print the turn-by-turn the phone sends -----------
     def _on_nav(self, mid, body):
