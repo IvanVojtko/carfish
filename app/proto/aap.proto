@@ -71,6 +71,7 @@ enum NavigationMessage {
     NAV_DISTANCE_EVENT = 32773;    // 0x8005 phone -> HU (legacy, NavigationNextTurnDistanceEvent)
     NAV_STATE = 32774;             // 0x8006 phone -> HU (NavigationState)
     NAV_CURRENT_POSITION = 32775;  // 0x8007 phone -> HU (NavigationCurrentPosition)
+    NAV_ENERGY_FORECAST = 32776;   // 0x8008 phone -> HU (NavigationVehicleEnergyForecast)
 }
 
 // --------------------------------------------------------------- value enums
@@ -579,9 +580,21 @@ message NavigationManeuver {
     optional int32 roundabout_exit_angle = 3;
 }
 
+// Lane guidance. shape: UNKNOWN=0 STRAIGHT=1 SLIGHT_LEFT=2 SLIGHT_RIGHT=3
+// NORMAL_LEFT=4 NORMAL_RIGHT=5 SHARP_LEFT=6 SHARP_RIGHT=7 U_TURN_LEFT=8
+// U_TURN_RIGHT=9; is_highlighted marks the lane(s) to use.
+message NavigationLaneDirection {
+    optional int32 shape = 1;
+    optional bool is_highlighted = 2;
+}
+message NavigationLane {
+    repeated NavigationLaneDirection lane_directions = 1;
+}
+
 message NavigationStep {
     optional NavigationManeuver maneuver = 1;
     optional NavigationRoad road = 2;
+    repeated NavigationLane lanes = 3;
     optional NavigationCue cue = 4;
 }
 
@@ -616,7 +629,25 @@ message NavigationCurrentPosition {
     optional NavigationRoad current_road = 3;
 }
 
-// DEPRECATED legacy pair (still sent for older head units).
+// Battery forecast for EVs (Gearhead: VehicleEnergyForecast -> aavh proto).
+// Energy is absolute Wh, not percent. Gearhead only sends it to head units on
+// protocol >= 5.1.
+message EnergyAtDistance {
+    optional int32 distance_meters = 1;
+    optional int32 arrival_battery_energy_wh = 2;
+    optional int32 time_to_arrival_seconds = 3;
+}
+message VehicleEnergyForecast {
+    optional EnergyAtDistance energy_at_next_stop = 1;
+    optional EnergyAtDistance distance_to_empty = 2;
+    optional int32 forecast_quality = 3;     // enum, names unknown; 0 = default
+}
+// phone -> HU, NAV_ENERGY_FORECAST (0x8008): the forecast, serialized.
+message NavigationVehicleEnergyForecast {
+    optional bytes forecast = 1;
+}
+
+// DEPRECATED legacy pair (only for head units older than protocol 1.6).
 // phone -> HU, NAV_TURN_EVENT (0x8004). turn_side: LEFT=1 RIGHT=2 UNSPECIFIED=3.
 // event (NextTurnEnum): DEPART=1 SLIGHT_TURN=3 TURN=4 SHARP_TURN=5 U_TURN=6
 // ON_RAMP=7 OFF_RAMP=8 FORK=9 MERGE=10 ROUNDABOUT_ENTER=11 ROUNDABOUT_EXIT=12

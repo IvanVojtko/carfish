@@ -42,8 +42,9 @@ Item {
 
     // Orientation: false = north-up (fixed), true = heading-up (the map rotates
     // with the car so "up" is the direction of travel, like Google Maps). The
-    // compass button in CarMain toggles this; _dispHeading is the heading used.
-    property bool headingUp: false
+    // compass button in CarMain toggles carScreen.mapHeadingUp (persisted by the
+    // Controller, so the choice survives restarts); _dispHeading is the heading used.
+    property bool headingUp: (typeof carScreen !== "undefined" && carScreen) ? carScreen.mapHeadingUp : false
     property real _dispHeading: 0
     // Current speed in km/h from the GPS fix (-1 until known / when invalid), so
     // CarMain can show a Google-Maps-style speedometer in the corner.
@@ -205,6 +206,8 @@ Item {
         _offCount = 0
         _lastReroute = Date.now()
         summary = "Rerouting…"
+        if (typeof navBridge !== "undefined" && navBridge)
+            navBridge.setRerouting(true) // cluster: "rerouting" until the new route arrives
         mlog("off route by >" + offRouteM + "m — rerouting from "
              + p.coordinate.latitude.toFixed(4) + "," + p.coordinate.longitude.toFixed(4)
              + " heading " + (p.directionValid ? Math.round(p.direction) : "n/a"))
@@ -234,7 +237,10 @@ Item {
                     var st = sl[i]
                     if (!st.maneuver || !st.maneuver.location) continue
                     steps.push({ text: _stepText(st), dir: _dirOf(st.maneuver),
-                                 lon: st.maneuver.location[0], lat: st.maneuver.location[1], dist: st.distance })
+                                 lon: st.maneuver.location[0], lat: st.maneuver.location[1], dist: st.distance,
+                                 // for the instrument cluster (NavBridge.setUpcoming)
+                                 navType: _navTypeOf(st), exit: st.maneuver.exit || 0,
+                                 road: st.name || "", lanes: _lanesOf(st) })
                 }
             }
         _steps = steps; _curStep = 0; _offCount = 0
@@ -254,8 +260,10 @@ Item {
         summary = ""; nextInstruction = ""; nextDistance = ""; destinationLabel = ""
         maneuverDir = 0; remainingM = 0; remainingS = 0; etaText = ""
         zoom = drivingZoom
-        if (typeof navBridge !== "undefined" && navBridge)
+        if (typeof navBridge !== "undefined" && navBridge) {
+            navBridge.setUpcoming([])
             navBridge.update(false, 0, "", "", "", 0, 0, 0, "")
+        }
     }
 
     // Desk self-test (preview only): exercise geocoding + routing with no user
@@ -288,9 +296,20 @@ Item {
         remainingS = (_totalM > 0) ? Math.round(_totalS * remainingM / _totalM) : _totalS
         etaText = Qt.formatTime(new Date(Date.now() + remainingS * 1000), "hh:mm")
         summary = _fmtDist(remainingM) + " · " + _fmtTime(remainingS)
-        if (typeof navBridge !== "undefined" && navBridge)
-            navBridge.update(navigating, maneuverDir, nextInstruction, "",
+        if (typeof navBridge !== "undefined" && navBridge) {
+            // The next (up to) 3 maneuvers for the cluster; the first is the one
+            // nextInstruction/maneuverDir describe.
+            var up = []
+            for (var k = _curStep; k < _steps.length && up.length < 3; k++) {
+                var sk = _steps[k]
+                up.push({ type: sk.navType, exit: sk.exit, road: sk.road, text: sk.text, lanes: sk.lanes })
+            }
+            navBridge.setUpcoming(up)
+            // Current road = the road the previous maneuver put us on.
+            var curRoad = _curStep > 0 ? _steps[_curStep - 1].road : ""
+            navBridge.update(navigating, maneuverDir, nextInstruction, curRoad,
                              destinationLabel, dm, remainingM, remainingS, etaText)
+        }
 
         // Arrival: once we're on the final step and within the arrival radius of
         // the destination, end navigation automatically (no manual stop needed).
@@ -330,20 +349,96 @@ Item {
         default: return 1
         }
     }
+    // OSRM step -> Android Auto NavigationType (== Car App Library
+    // Maneuver.TYPE_*), so the cluster gets the real maneuver: roundabouts with
+    // their exit number, forks, ramps, merges, arrival side. U-turns and
+    // roundabout direction follow the step's driving side.
+    function _navTypeOf(st) {
+        var m = st.maneuver || {}, mod = m.modifier || "", t = m.type || ""
+        var rightHand = (st.driving_side || "right") !== "left"
+        if (st.mode === "ferry") return 37                          // FERRY_BOAT
+        function turn(base) {                                     // TURN_* family
+            switch (mod) {
+            case "slight left": return 5
+            case "slight right": return 6
+            case "left": return 7
+            case "right": return 8
+            case "sharp left": return 9
+            case "sharp right": return 10
+            case "uturn": return rightHand ? 11 : 12
+            default: return base
+            }
+        }
+        function ramp(off) {
+            var left = mod.indexOf("left") >= 0
+            if (off) return mod.indexOf("slight") >= 0 ? (left ? 21 : 22) : (left ? 23 : 24)
+            if (mod.indexOf("slight") >= 0) return left ? 13 : 14
+            if (mod.indexOf("sharp") >= 0) return left ? 17 : 18
+            if (mod === "uturn") return rightHand ? 19 : 20
+            return left ? 15 : (mod.indexOf("right") >= 0 ? 16 : 36)
+        }
+        switch (t) {
+        case "depart": return 1                                      // DEPART
+        case "arrive":
+            return mod.indexOf("left") >= 0 ? 41 : (mod.indexOf("right") >= 0 ? 42 : 39)
+        case "new name": return 2                                    // NAME_CHANGE
+        case "fork":
+            return mod.indexOf("left") >= 0 ? 25 : (mod.indexOf("right") >= 0 ? 26 : 36)
+        case "merge":
+            return mod.indexOf("left") >= 0 ? 27 : (mod.indexOf("right") >= 0 ? 28 : 29)
+        case "on ramp": return ramp(false)
+        case "off ramp": return ramp(true)
+        case "roundabout": case "rotary":
+            // ROUNDABOUT_ENTER_AND_EXIT_CCW (34) for right-hand traffic, _CW (32) otherwise
+            return rightHand ? 34 : 32
+        case "exit roundabout": case "exit rotary": return 31        // ROUNDABOUT_EXIT
+        default: return turn(36)                                      // STRAIGHT
+        }
+    }
+    // Lane guidance at a step's maneuver: OSRM puts the approach lanes on the
+    // step's first intersection. Each lane -> [{shape, hl}], shape per
+    // NavigationLaneDirection; hl marks directions usable for this maneuver.
+    function _lanesOf(st) {
+        var ints = st.intersections
+        if (!ints || !ints.length || !ints[0].lanes) return []
+        var mod = (st.maneuver && st.maneuver.modifier) || "straight"
+        var rightHand = (st.driving_side || "right") !== "left"
+        var shapes = { "straight": 1, "slight left": 2, "slight right": 3, "left": 4,
+                       "right": 5, "sharp left": 6, "sharp right": 7,
+                       "uturn": rightHand ? 8 : 9, "none": 0 }
+        var out = []
+        for (var i = 0; i < ints[0].lanes.length; i++) {
+            var ln = ints[0].lanes[i], ind = ln.indications || ["none"]
+            var match = ind.indexOf(mod) >= 0
+            var dirs = []
+            for (var j = 0; j < ind.length; j++) {
+                var s = shapes[ind[j]]
+                dirs.push({ shape: s === undefined ? 0 : s,
+                            hl: !!ln.valid && (!match || ind[j] === mod) })
+            }
+            out.push(dirs)
+        }
+        return out
+    }
     function _stepText(st) {
         var m = st.maneuver, mod = m.modifier || "", name = st.name || ""
         var onName = name ? " onto " + name : ""
         switch (m.type) {
         case "depart": return "Head out" + (name ? " on " + name : "")
         case "arrive": return "Arrive at destination"
-        case "turn": case "end of road": return "Turn " + mod + onName
+        case "turn": case "end of road":
+            return mod === "straight" ? "Continue" + onName : "Turn " + mod + onName
+        case "exit roundabout": case "exit rotary": return "Exit the roundabout" + onName
         case "new name": return "Continue" + (name ? " on " + name : "")
         case "continue": return "Continue" + (mod ? " " + mod : "") + onName
         case "merge": return "Merge" + onName
         case "on ramp": return "Take the ramp" + onName
         case "off ramp": return "Take the exit" + onName
         case "fork": return "Keep " + (mod || "straight") + onName
-        case "roundabout": case "rotary": return "At the roundabout, exit" + onName
+        case "roundabout": case "rotary":
+            var ex = m.exit || 0
+            var nth = ex === 1 ? "1st" : ex === 2 ? "2nd" : ex === 3 ? "3rd" : ex + "th"
+            return "At the roundabout, " + (ex > 0 ? "take the " + nth + " exit" : "exit") + onName
         default: return (mod ? "Turn " + mod : "Continue") + onName
         }
     }

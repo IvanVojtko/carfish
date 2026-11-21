@@ -9,7 +9,12 @@
 #include "transport/transport.h"
 
 #include <QDateTime>
+#include <QBuffer>
 #include <QDir>
+#include <QImage>
+#include <QPainter>
+#include <QPainterPath>
+#include <QtMath>
 #include <QSet>
 #include <QStringList>
 
@@ -95,6 +100,8 @@ Session::Session(Transport *transport, CarScreen *screen, const Config &config, 
         if (m_nav)
             connect(m_nav, &NavBridge::updated, this, &Session::onNavUpdated);
     }
+    m_navFlush.setSingleShot(true);
+    connect(&m_navFlush, &QTimer::timeout, this, &Session::flushNavGuidance);
 }
 
 Session::~Session()
@@ -412,7 +419,16 @@ void Session::onServiceDiscovery(const QByteArray &body)
             const NavigationStatusService &nav = svc.navigation_status_service();
             if (nav.has_minimum_interval_ms() && nav.minimum_interval_ms() > 0)
                 m_navMinIntervalMs = nav.minimum_interval_ms();
-            log(tr("instrument cluster navigation available (min interval %1 ms)").arg(m_navMinIntervalMs));
+            m_navWantsImages = nav.has_type() && nav.type() == 1; // IMAGE
+            if (nav.has_image_options()) {
+                m_navImgW = nav.image_options().width();
+                m_navImgH = nav.image_options().height();
+            }
+            log(tr("instrument cluster navigation available (min interval %1 ms, %2%3)")
+                    .arg(m_navMinIntervalMs)
+                    .arg(m_navWantsImages ? tr("turn images") : tr("turn icons"))
+                    .arg(m_navWantsImages ? QStringLiteral(" %1x%2").arg(m_navImgW).arg(m_navImgH)
+                                          : QString()));
         } else if (svc.has_phone_status_service() && m_phoneStatusChannel < 0) {
             // The HU can show the in-AA call screen. Open the channel; we then
             // push call state (PhoneStatus) onto it and receive answer/reject.
@@ -869,10 +885,13 @@ void Session::onNavUpdated()
         return;
 
     if (!m_nav->active()) {
+        m_navFlush.stop();
         if (m_navActive) {
-            sendNavStatus(2); // INACTIVE
+            sendNavClear();
             m_navActive = false;
+            m_lastNavSendMs = 0;
         }
+        m_navRerouting = false;
         return;
     }
 
@@ -880,15 +899,46 @@ void Session::onNavUpdated()
     if (!m_navActive) {
         sendNavStatus(1); // ACTIVE
         m_navActive = true;
+        m_navRerouting = false;
         m_lastNavSendMs = 0; // force a guidance push right away
     }
 
-    // Respect the cluster's advertised rate floor for guidance pushes.
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (m_lastNavSendMs != 0 && now - m_lastNavSendMs < m_navMinIntervalMs)
+    // Off route: tell the cluster a new route is coming (head units >= 1.6, as
+    // Gearhead does). The next guidance update (new route) switches back.
+    if (m_nav->rerouting()) {
+        if (!m_navRerouting && navModernHu()) {
+            sendNavStatus(3); // REROUTING
+            m_navRerouting = true;
+            log(tr("instrument cluster: rerouting"));
+        }
         return;
-    m_lastNavSendMs = now;
+    }
+    if (m_navRerouting) {
+        sendNavStatus(1); // ACTIVE again, with the new route
+        m_navRerouting = false;
+        m_lastNavSendMs = 0;
+    }
+
+    // Respect the cluster's advertised rate floor, but never drop the newest
+    // update: if we are inside the window, send it when the window ends.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 wait = m_lastNavSendMs == 0 ? 0 : m_lastNavSendMs + m_navMinIntervalMs - now;
+    if (wait > 0) {
+        if (!m_navFlush.isActive())
+            m_navFlush.start(int(wait));
+        return;
+    }
+    flushNavGuidance();
+}
+
+void Session::flushNavGuidance()
+{
+    m_navFlush.stop();
+    if (!m_nav || m_navChannel < 0 || !m_nav->active() || !m_navActive || m_navRerouting)
+        return;
+    m_lastNavSendMs = QDateTime::currentMSecsSinceEpoch();
     sendNavGuidance();
+    sendEnergyForecast();
 }
 
 void Session::sendNavStatus(int status)
@@ -898,6 +948,150 @@ void Session::sendNavStatus(int status)
     NavigationStatus st;
     st.set_status(status);
     send(quint8(m_navChannel), NAV_STATUS, st.SerializeAsString());
+}
+
+// Guidance ended (arrived / cancelled). STATUS(INACTIVE) alone is not enough on
+// some head units: the cluster keeps drawing the last turn it was sent. So first
+// overwrite the guidance with empty messages -- a NavigationState with no steps
+// and no destination, and a NavigationCurrentPosition with no distances -- and
+// only then report INACTIVE.
+void Session::sendNavClear()
+{
+    if (m_navChannel < 0)
+        return;
+    send(quint8(m_navChannel), NAV_STATE, NavigationState().SerializeAsString());
+    send(quint8(m_navChannel), NAV_CURRENT_POSITION, NavigationCurrentPosition().SerializeAsString());
+    sendNavStatus(2); // INACTIVE
+    log(tr("navigation ended: cleared instrument cluster guidance"));
+}
+
+// Legacy NextTurnEnum + turn side from a NavigationType (richer than the
+// QtLocation direction: knows roundabouts, forks, ramps, merges, arrival).
+static int navLegacyEventFromType(int t)
+{
+    switch (t) {
+    case 1:                          return 1;  // DEPART
+    case 2:                          return 2;  // NAME_CHANGE
+    case 3: case 4: case 5: case 6:  return 3;  // keep / slight -> SLIGHT_TURN
+    case 7: case 8:                  return 4;  // TURN
+    case 9: case 10:                 return 5;  // SHARP_TURN
+    case 11: case 12:                return 6;  // U_TURN
+    case 25: case 26:                return 9;  // FORK
+    case 27: case 28: case 29:       return 10; // MERGE
+    case 30:                         return 11; // ROUNDABOUT_ENTER
+    case 31:                         return 12; // ROUNDABOUT_EXIT
+    case 32: case 33: case 34: case 35: return 13; // ROUNDABOUT_ENTER_AND_EXIT
+    case 37:                         return 16; // FERRY_BOAT
+    case 38:                         return 17; // FERRY_TRAIN
+    case 39: case 40: case 41: case 42: return 19; // DESTINATION
+    default:
+        if (t >= 13 && t <= 20) return 7;  // ON_RAMP
+        if (t >= 21 && t <= 24) return 8;  // OFF_RAMP
+        return 14;                         // STRAIGHT
+    }
+}
+
+static int navTurnSideFromType(int t)
+{
+    switch (t) {
+    case 3: case 5: case 7: case 9: case 11: case 13: case 15: case 17: case 19:
+    case 21: case 23: case 25: case 27: case 41: case 32: case 33:
+        return 1; // LEFT (clockwise roundabouts drive on the left)
+    case 4: case 6: case 8: case 10: case 12: case 14: case 16: case 18: case 20:
+    case 22: case 24: case 26: case 28: case 42: case 34: case 35:
+        return 2; // RIGHT
+    default:
+        return 3; // UNSPECIFIED
+    }
+}
+
+// Bend of a NavigationType in degrees (0 = straight, + = right), for the arrow.
+static int navTurnAngle(int t)
+{
+    switch (t) {
+    case 5: case 13: case 21: case 3: case 25: case 27: return -45;
+    case 6: case 14: case 22: case 4: case 26: case 28: return 45;
+    case 7: case 15: case 23: return -90;
+    case 8: case 16: case 24: return 90;
+    case 9: case 17: return -135;
+    case 10: case 18: return 135;
+    default: return 0;
+    }
+}
+
+// White-on-transparent turn arrow PNG for head units whose cluster wants
+// images (NavigationStatusService type IMAGE) in the legacy turn event.
+static QByteArray navTurnImage(int type, int exitNo, int w, int h)
+{
+    if (w <= 0 || h <= 0) { w = 128; h = 128; }
+    QImage img(w, h, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    QPainter p(&img);
+    p.setRenderHint(QPainter::Antialiasing);
+    const qreal s = qMin(w, h);
+    QPen pen(Qt::white, s * 0.12, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    p.setPen(pen);
+    p.translate(w / 2.0, h / 2.0);
+    auto head = [&](QPointF tip, qreal deg) {        // filled arrowhead at tip
+        p.save();
+        p.translate(tip);
+        p.rotate(deg);
+        QPainterPath a;
+        a.moveTo(0, -s * 0.16);
+        a.lineTo(s * 0.16, s * 0.04);
+        a.lineTo(-s * 0.16, s * 0.04);
+        a.closeSubpath();
+        p.setPen(Qt::NoPen);
+        p.setBrush(Qt::white);
+        p.drawPath(a);
+        p.restore();
+    };
+    const bool dest = type >= 39 && type <= 42;
+    const bool round = type >= 30 && type <= 35;
+    const bool uturn = type == 11 || type == 12 || type == 19 || type == 20;
+    if (dest) {                                      // destination: ring + dot
+        p.drawEllipse(QPointF(0, -s * 0.05), s * 0.22, s * 0.22);
+        p.setBrush(Qt::white);
+        p.drawEllipse(QPointF(0, -s * 0.05), s * 0.06, s * 0.06);
+    } else if (round) {                              // roundabout: ring, stem, exit #
+        p.drawEllipse(QPointF(0, -s * 0.08), s * 0.18, s * 0.18);
+        p.drawLine(QPointF(0, s * 0.42), QPointF(0, s * 0.10));
+        if (exitNo > 0) {
+            QFont f = p.font();
+            f.setPixelSize(int(s * 0.2));
+            f.setBold(true);
+            p.setFont(f);
+            p.drawText(QRectF(-s * 0.18, -s * 0.26, s * 0.36, s * 0.36), Qt::AlignCenter,
+                       QString::number(exitNo));
+        }
+    } else if (uturn) {                              // U-turn hook
+        const qreal dx = (type == 11 || type == 19) ? -1 : 1;
+        QPainterPath u;
+        u.moveTo(s * 0.15 * -dx, s * 0.40);
+        u.lineTo(s * 0.15 * -dx, -s * 0.10);
+        u.arcTo(QRectF(-s * 0.15, -s * 0.25, s * 0.30, s * 0.30), dx < 0 ? 0 : 180, dx < 0 ? 180 : -180);
+        u.lineTo(s * 0.15 * dx, s * 0.10);
+        p.drawPath(u);
+        head(QPointF(s * 0.15 * dx, s * 0.22), 180);
+    } else {                                         // stem up, then bend by angle
+        const qreal deg = navTurnAngle(type);
+        // Sharp turns bend back down: raise the knee and shift the stem away
+        // from the turn so the arrowhead has room.
+        const bool sharp = qAbs(deg) > 90;
+        const QPointF knee(sharp ? (deg > 0 ? -s * 0.14 : s * 0.14) : 0, sharp ? -s * 0.18 : s * 0.02);
+        p.drawLine(QPointF(knee.x(), s * 0.42), knee);
+        const qreal rad = qDegreesToRadians(deg);
+        const qreal len = s * 0.28;
+        const QPointF tip(knee.x() + len * qSin(rad), knee.y() - len * qCos(rad));
+        p.drawLine(knee, tip);
+        head(tip, deg);
+    }
+    p.end();
+    QByteArray png;
+    QBuffer buf(&png);
+    buf.open(QIODevice::WriteOnly);
+    img.save(&buf, "PNG");
+    return png;
 }
 
 void Session::sendNavGuidance()
@@ -910,39 +1104,80 @@ void Session::sendNavGuidance()
     const std::string instr = m_nav->instruction().toStdString();
     const int stepM = qMax(0, m_nav->stepMeters());
     const int remM = qMax(0, m_nav->remainingMeters());
+    const QVariantList upcoming = m_nav->upcoming();
+    const QVariantMap first = upcoming.value(0).toMap();
+    const int firstType = first.isEmpty() ? navTypeFromDir(dir) : first.value(QStringLiteral("type")).toInt();
+    const int firstExit = first.value(QStringLiteral("exit")).toInt();
 
-    // NavigationState: the upcoming step (+ destination), modern cluster UI.
-    NavigationState state;
-    NavigationStep *step = state.add_steps();
-    step->mutable_maneuver()->set_type(navTypeFromDir(dir));
-    if (!road.empty())
-        step->mutable_road()->set_name(road);
-    if (!instr.empty())
-        step->mutable_cue()->add_alternate_text(instr);
-    if (!m_nav->destLabel().isEmpty())
-        state.add_destinations()->set_address(m_nav->destLabel().toStdString());
-    send(quint8(m_navChannel), NAV_STATE, state.SerializeAsString());
+    // Head units on protocol >= 1.6 get the modern STATE + CURRENT_POSITION,
+    // older ones only the legacy TURN/DISTANCE pair -- exactly what Gearhead
+    // does. (Sending both confuses some clusters, e.g. stale turns.)
+    if (navModernHu()) {
+        // NavigationState: the next up-to-3 maneuvers (+ lanes) and destination.
+        NavigationState state;
+        if (upcoming.isEmpty()) {
+            NavigationStep *step = state.add_steps();
+            step->mutable_maneuver()->set_type(navTypeFromDir(dir));
+            if (!instr.empty())
+                step->mutable_cue()->add_alternate_text(instr);
+        }
+        for (int i = 0; i < upcoming.size() && i < 3; ++i) {
+            const QVariantMap u = upcoming.at(i).toMap();
+            NavigationStep *step = state.add_steps();
+            NavigationManeuver *m = step->mutable_maneuver();
+            m->set_type(u.value(QStringLiteral("type")).toInt());
+            const int exitNo = u.value(QStringLiteral("exit")).toInt();
+            if (exitNo > 0)
+                m->set_roundabout_exit_number(exitNo);
+            const QString stepRoad = u.value(QStringLiteral("road")).toString();
+            if (!stepRoad.isEmpty())
+                step->mutable_road()->set_name(stepRoad.toStdString());
+            const QString text = u.value(QStringLiteral("text")).toString();
+            if (!text.isEmpty())
+                step->mutable_cue()->add_alternate_text(text.toStdString());
+            const QVariantList lanes = u.value(QStringLiteral("lanes")).toList();
+            for (const QVariant &lv : lanes) {
+                NavigationLane *lane = step->add_lanes();
+                for (const QVariant &dv : lv.toList()) {
+                    const QVariantMap d = dv.toMap();
+                    NavigationLaneDirection *ld = lane->add_lane_directions();
+                    ld->set_shape(d.value(QStringLiteral("shape")).toInt());
+                    ld->set_is_highlighted(d.value(QStringLiteral("hl")).toBool());
+                }
+            }
+        }
+        if (!m_nav->destLabel().isEmpty())
+            state.add_destinations()->set_address(m_nav->destLabel().toStdString());
+        send(quint8(m_navChannel), NAV_STATE, state.SerializeAsString());
 
-    // NavigationCurrentPosition: distance to next step + to destination.
-    NavigationCurrentPosition pos;
-    navFillDistance(pos.mutable_step_distance()->mutable_distance(), stepM);
-    if (remM > 0) {
-        NavigationDestinationDistance *dd = pos.add_destination_distances();
-        navFillDistance(dd->mutable_distance(), remM);
-        if (m_nav->remainingSeconds() > 0)
-            dd->set_time_to_arrival_seconds(m_nav->remainingSeconds());
-        if (!m_nav->eta().isEmpty())
-            dd->set_estimated_time_at_arrival(m_nav->eta().toStdString());
+        // NavigationCurrentPosition: distance to next step + to destination.
+        NavigationCurrentPosition pos;
+        navFillDistance(pos.mutable_step_distance()->mutable_distance(), stepM);
+        if (remM > 0) {
+            NavigationDestinationDistance *dd = pos.add_destination_distances();
+            navFillDistance(dd->mutable_distance(), remM);
+            if (m_nav->remainingSeconds() > 0)
+                dd->set_time_to_arrival_seconds(m_nav->remainingSeconds());
+            if (!m_nav->eta().isEmpty())
+                dd->set_estimated_time_at_arrival(m_nav->eta().toStdString());
+        }
+        if (!road.empty())
+            pos.mutable_current_road()->set_name(road);
+        send(quint8(m_navChannel), NAV_CURRENT_POSITION, pos.SerializeAsString());
+        return;
     }
-    if (!road.empty())
-        pos.mutable_current_road()->set_name(road);
-    send(quint8(m_navChannel), NAV_CURRENT_POSITION, pos.SerializeAsString());
 
-    // Legacy pair for older head units that ignore STATE/CURRENT_POSITION.
+    // Legacy pair for head units older than 1.6.
     NavigationNextTurnEvent turn;
     turn.set_road(instr.empty() ? road : instr);
-    turn.set_turn_side(navTurnSide(dir));
-    turn.set_event(navLegacyEvent(dir));
+    turn.set_turn_side(first.isEmpty() ? navTurnSide(dir) : navTurnSideFromType(firstType));
+    turn.set_event(first.isEmpty() ? navLegacyEvent(dir) : navLegacyEventFromType(firstType));
+    if (firstExit > 0)
+        turn.set_turn_number(firstExit);
+    if (m_navWantsImages) {
+        const QByteArray png = navTurnImage(firstType, firstExit, m_navImgW, m_navImgH);
+        turn.set_image(png.constData(), size_t(png.size()));
+    }
     send(quint8(m_navChannel), NAV_TURN_EVENT, turn.SerializeAsString());
 
     NavigationNextTurnDistanceEvent dist;
@@ -957,6 +1192,56 @@ void Session::sendNavGuidance()
         dist.set_display_distance_e3(rounded * 1000);
     }
     send(quint8(m_navChannel), NAV_DISTANCE_EVENT, dist.SerializeAsString());
+}
+
+// EV battery forecast to the cluster (what Google Maps pushes as
+// VehicleEnergyForecast). AAP has no battery capacity, and the forecast is in
+// Wh, so it needs the capacity the user entered in the phone app. The arrival
+// energy comes from the car's own range (which embeds its consumption model):
+//   arrival = capacity * SoC% * (range - distanceToGo) / range
+void Session::sendEnergyForecast()
+{
+    if (!m_nav || m_navChannel < 0 || !m_evCar)
+        return;
+    const double capKwh = m_screen ? m_screen->evCapacityKwh() : 0.0;
+    QString why;
+    if (!energyForecastHu())
+        why = tr("head unit protocol %1.%2 is too old (Google needs 5.1+)").arg(m_huMajor).arg(m_huMinor);
+    else if (capKwh <= 0)
+        why = tr("no battery capacity set in the phone app");
+    else if (m_fuelPct < 0 || m_fuelRangeKm <= 0)
+        why = tr("the car hasn't reported charge level and range yet");
+    if (!why.isEmpty()) {
+        if (!m_forecastLogged) {
+            m_forecastLogged = true;
+            log(tr("instrument cluster: no battery forecast — %1").arg(why));
+        }
+        return;
+    }
+    const int remM = qMax(0, m_nav->remainingMeters());
+    const double rangeM = m_fuelRangeKm * 1000.0;
+    const double nowWh = capKwh * 1000.0 * m_fuelPct / 100.0;
+    const double arrivalWh = qMax(0.0, nowWh * (rangeM - remM) / rangeM);
+
+    VehicleEnergyForecast fc;
+    EnergyAtDistance *next = fc.mutable_energy_at_next_stop();
+    next->set_distance_meters(remM);
+    next->set_arrival_battery_energy_wh(int(qRound(arrivalWh)));
+    if (m_nav->remainingSeconds() > 0)
+        next->set_time_to_arrival_seconds(m_nav->remainingSeconds());
+    EnergyAtDistance *empty = fc.mutable_distance_to_empty();
+    empty->set_distance_meters(int(rangeM));
+    empty->set_arrival_battery_energy_wh(0);
+
+    NavigationVehicleEnergyForecast msg;
+    const std::string body = fc.SerializeAsString();
+    msg.set_forecast(body);
+    send(quint8(m_navChannel), NAV_ENERGY_FORECAST, msg.SerializeAsString());
+    if (!m_forecastSentLogged) {
+        m_forecastSentLogged = true;
+        log(tr("instrument cluster: sending battery forecast (%1 Wh at arrival, %2 kWh pack)")
+                .arg(qRound(arrivalWh)).arg(capKwh));
+    }
 }
 
 // Two rectangles share an aspect ratio within ~1% (F-Auto TouchMapper heuristic).
@@ -1207,6 +1492,8 @@ void Session::onSensorBatch(const QByteArray &body)
                 .arg(m_evCar ? tr("battery") : tr("fuel"))
                 .arg(pct).arg(rangeKm)
                 .arg(f.low_fuel_warning() ? tr(" (LOW)") : QString()));
+        m_fuelPct = pct;
+        m_fuelRangeKm = rangeKm;
         emit energyStatus(pct, rangeKm, m_evCar, f.low_fuel_warning());
     }
 }

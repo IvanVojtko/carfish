@@ -8,6 +8,7 @@
 #include <QObject>
 #include <QRect>
 #include <QSize>
+#include <QTimer>
 #include <QUrl>
 #include <QVector>
 
@@ -130,7 +131,13 @@ private:
     // Instrument-cluster turn-by-turn (from the map UI via NavBridge).
     void onNavUpdated();
     void sendNavStatus(int status);   // NavigationStatus (ACTIVE/INACTIVE/REROUTING)
-    void sendNavGuidance();           // STATE + CURRENT_POSITION + legacy events
+    void sendNavClear();              // wipe the cluster turn card when guidance ends
+    void sendNavGuidance();           // STATE + CURRENT_POSITION, or the legacy pair
+    void sendEnergyForecast();        // EV battery forecast (0x8008), when supported
+    void flushNavGuidance();          // rate-limited push of the newest guidance
+    // Gearhead's head-unit gates (CarInfo major/minor = the HU's protocol version):
+    bool navModernHu() const { return m_huMajor > 1 || (m_huMajor == 1 && m_huMinor >= 6); }
+    bool energyForecastHu() const { return m_huMajor > 5 || (m_huMajor == 5 && m_huMinor > 0); }
 
     void startVideo(ChannelInfo &ch, quint8 channel);
     void stopVideo();
@@ -173,6 +180,14 @@ private:
     int m_touchSrcX = 0;
     int m_touchSrcY = 0;// cluster channel open / focus granted
     qint64 m_lastNavSendMs = 0;
+    QTimer m_navFlush;             // trailing send when an update hits the rate floor
+    bool m_navRerouting = false;   // STATUS(REROUTING) sent, waiting for the new route
+    bool m_navWantsImages = false; // cluster type IMAGE: legacy turn events carry a PNG
+    int m_navImgW = 0, m_navImgH = 0;
+    int m_fuelPct = -1;            // last FUEL sensor reading (EV: state of charge %)
+    int m_fuelRangeKm = -1;        //   and remaining range
+    bool m_forecastLogged = false;     // "why no forecast" logged once
+    bool m_forecastSentLogged = false; // "sending forecast" logged once
     NavBridge *m_nav = nullptr;    // source of turn-by-turn from the map UI
     bool m_micOn = false;
     int m_nextSessionId = 1;
