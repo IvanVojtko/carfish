@@ -169,13 +169,34 @@ void PhoneManager::dial(const QString &number)
     return;
 #else
     if (!m_mgr || !m_mgr->isValid()) {
+        // voicecall-manager may not have been up when we started; try again.
+        delete m_mgr;
+        m_mgr = nullptr;
+        connectManager();
+    }
+    if (!m_mgr || !m_mgr->isValid()) {
         emit log(QStringLiteral("dial: voicecall-manager unavailable"));
         return;
     }
-    QStringList providers = m_mgr->property("providers").toStringList();
-    QString provider = providers.value(0);
-    if (provider.isEmpty())
-        provider = QStringLiteral("ril_0");
+    // Each "providers" entry is "<providerId>:<providerType>" (e.g.
+    // "telepathy-ring/tel/ril_0:tel"), but dial() wants the bare providerId.
+    // Passing the whole entry made every call fail. Pick the alphabetically first
+    // id, as the stock dialer (VoiceCallProviderModel) does.
+    QStringList ids;
+    const QStringList providers = m_mgr->property("providers").toStringList();
+    for (const QString &p : providers) {
+        const int colon = p.lastIndexOf(QLatin1Char(':'));
+        const QString id = colon > 0 ? p.left(colon) : p;
+        if (!id.isEmpty())
+            ids << id;
+    }
+    ids.sort();
+    if (ids.isEmpty()) {
+        emit log(QStringLiteral("dial: no voice call provider (modem offline?) providers=[%1]")
+                     .arg(providers.join(QStringLiteral(", "))));
+        return;
+    }
+    const QString provider = ids.first();
     emit log(QStringLiteral("dial %1 via %2").arg(number, provider));
     QDBusPendingCall pc = m_mgr->asyncCall(QStringLiteral("dial"), provider, number);
     auto *w = new QDBusPendingCallWatcher(pc, this);
