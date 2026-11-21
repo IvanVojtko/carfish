@@ -148,6 +148,91 @@ Item {
         xhr.open("GET", url); xhr.send()
     }
 
+    // --- EV charging stations nearby (OpenStreetMap via Nominatim; no key) ---
+    // [{address:{text}, sub, coordinate, _dist, kw}], nearest first. Nominatim
+    // returns at most 40 hits per box in no distance order, so look ~5 km around
+    // first and widen to chargerRadiusKm only when that finds few. (Overpass
+    // would be the natural API, but its public servers routinely take 40 s+.)
+    property var chargerModel: []
+    property bool chargerSearching: false
+    readonly property int chargerRadiusKm: 25
+    property var _chargerHere: null
+    property var _chargerSeen: ({})
+    function findChargers() {
+        _chargerHere = (gps.position.latitudeValid && gps.position.longitudeValid)
+                       ? gps.position.coordinate : QtPositioning.coordinate(centerLat, centerLon)
+        chargerModel = []
+        _chargerSeen = {}
+        chargerSearching = true
+        _chargerQuery(5)
+    }
+    Timer {   // Nominatim usage policy: at most one request per second
+        id: chargerWiden; interval: 1100
+        onTriggered: _chargerQuery(chargerRadiusKm)
+    }
+    function _chargerQuery(km) {
+        var here = _chargerHere
+        var dLat = km / 111.0, dLon = km / (111.0 * Math.max(0.2, Math.cos(here.latitude * Math.PI / 180)))
+        var vb = (here.longitude - dLon).toFixed(4) + "," + (here.latitude + dLat).toFixed(4) + ","
+               + (here.longitude + dLon).toFixed(4) + "," + (here.latitude - dLat).toFixed(4)
+        var url = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=40&bounded=1"
+                + "&extratags=1&amenity=charging_station&viewbox=" + vb
+        var xhr = new XMLHttpRequest()
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return
+            var out = chargerModel.slice(0)
+            if (xhr.status === 200) {
+                try {
+                    var arr = JSON.parse(xhr.responseText)
+                    for (var i = 0; i < arr.length; i++) {
+                        var r = arr[i], key = r.osm_type + r.osm_id
+                        if (_chargerSeen[key]) continue
+                        _chargerSeen[key] = true
+                        var t = r.extratags || {}
+                        var c = QtPositioning.coordinate(parseFloat(r.lat), parseFloat(r.lon))
+                        var who = t.operator || t.network || t.brand || ""
+                        var title = r.name || who || "Charging station"
+                        var kw = _chargerKw(t), bits = []
+                        if (kw > 0) bits.push((kw >= 10 ? Math.round(kw) : kw.toFixed(1)) + " kW")
+                        if (t.capacity) bits.push(t.capacity + (t.capacity === "1" ? " point" : " points"))
+                        if (who && who !== title) bits.push(who)
+                        // No details at all: show where it is (street, area).
+                        if (!bits.length && r.display_name)
+                            bits.push(r.display_name.split(",").slice(r.name ? 1 : 0, 3).join(",").trim())
+                        out.push({ address: { text: title }, sub: bits.join(" · "), coordinate: c,
+                                   _dist: here.distanceTo(c), kw: kw })
+                    }
+                } catch (err) { mlog("chargers parse err " + err) }
+            } else {
+                mlog("chargers http " + xhr.status)
+            }
+            out.sort(function(a, b) { return a._dist - b._dist })
+            chargerModel = out.slice(0, 30)
+            if (km < chargerRadiusKm && out.length < 8) {
+                chargerWiden.start()
+            } else {
+                chargerSearching = false
+                mlog("chargers within " + km + " km: " + out.length)
+            }
+        }
+        xhr.open("GET", url); xhr.send()
+    }
+    // Highest charging power (kW) from the OSM tags: socket:<type>:output or
+    // charging_station:output, e.g. "150 kW", "11+22kW", "22 kW;50 kW", "11000 W".
+    function _chargerKw(t) {
+        var best = 0
+        for (var k in t) {
+            if (!/(^socket:.*:output$)|(^charging_station:output$)/.test(k)) continue
+            var re = /([0-9]+(?:[.,][0-9]+)?)\s*(kW|kVA|W)?/gi, m
+            while ((m = re.exec(String(t[k]))) !== null) {
+                var v = parseFloat(m[1].replace(",", "."))
+                if ((m[2] && m[2].toLowerCase() === "w") || v >= 1000) v /= 1000
+                if (v > best && v < 1000) best = v
+            }
+        }
+        return best
+    }
+
     function navigateTo(coord, label) {
         if (!coord || !coord.isValid) return
         var from = (gps.position.latitudeValid && gps.position.longitudeValid)

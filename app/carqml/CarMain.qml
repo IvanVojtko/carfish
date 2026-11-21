@@ -32,6 +32,8 @@ Rectangle {
         if (typeof previewPlaces !== "undefined" && previewPlaces === "1") {
             root.mapExpanded = true; root.searching = true
         }
+        if (typeof previewChargers !== "undefined" && previewChargers === "1")
+            chargersPreview.start()
         if (typeof previewQueue !== "undefined" && previewQueue === "1")
             root.showQueue = true
         if (typeof previewHeadingUp !== "undefined" && previewHeadingUp === "1")
@@ -42,6 +44,11 @@ Rectangle {
     Timer {
         id: hdgPreview; interval: 700
         onTriggered: if (root.navMap) { root.navMap._dispHeading = 40; carScreen.mapHeadingUp = true; root.navMap.speedKmh = 48 }
+    }
+    // Preview-only: open the charger list (live Overpass query) once the map loads.
+    Timer {
+        id: chargersPreview; interval: 700
+        onTriggered: { root.mapExpanded = true; root.openChargers() }
     }
     // Preview-only: run the destination search once the map has loaded, so a
     // still shows live (distance-sorted) results.
@@ -63,8 +70,11 @@ Rectangle {
             root.navMap.etaText = "14:32"
             root.navMap.speedKmh = 48
             root.navMap.remainingM = 12000
+            // PREVIEW_EV_PCT=<n> sets the car's charge so stills can show the
+            // amber/red arrival states and the low-battery warning.
+            var soc = (typeof previewEvPct !== "undefined" && previewEvPct) ? parseInt(previewEvPct) : 72
             if (typeof carScreen !== "undefined" && carScreen && carScreen.setEnergy)
-                carScreen.setEnergy(72, 210, true, false) // EV: 72%, 210 km range
+                carScreen.setEnergy(soc, Math.round(soc * 2.9), true, soc < 15) // ~290 km at 100%
         }
     }
 
@@ -139,7 +149,14 @@ Rectangle {
     // Saved-place picking: "home"/"work" while the search is choosing that
     // place (the next result tapped is saved instead of navigated to).
     property string pickPlace: ""
-    onSearchingChanged: if (!searching) pickPlace = ""
+    onSearchingChanged: if (!searching) { pickPlace = ""; chargerMode = false }
+    // The search overlay is listing EV charging stations instead of geocoding.
+    property bool chargerMode: false
+    function openChargers() {
+        root.searchText = ""; root.pickPlace = ""
+        root.chargerMode = true; root.searching = true
+        if (root.navMap) root.navMap.findChargers()
+    }
     onPickPlaceChanged: if (root.navMap) root.navMap.geocodeModel = [] // no stale results
     readonly property bool havePlaces: typeof carScreen !== "undefined" && carScreen
                                        && carScreen.places !== undefined
@@ -329,6 +346,16 @@ Rectangle {
                     ctx.moveTo(w * 0.16, h * 0.54);
                     ctx.lineTo(w * 0.84, h * 0.54);
                     ctx.stroke();
+                } else if (name === "bolt") {
+                    ctx.beginPath();
+                    ctx.moveTo(w * 0.58, h * 0.10);
+                    ctx.lineTo(w * 0.24, h * 0.56);
+                    ctx.lineTo(w * 0.48, h * 0.56);
+                    ctx.lineTo(w * 0.40, h * 0.90);
+                    ctx.lineTo(w * 0.76, h * 0.42);
+                    ctx.lineTo(w * 0.52, h * 0.42);
+                    ctx.closePath();
+                    ctx.fill();
                 } else if (name === "recent") {
                     ctx.beginPath();
                     ctx.arc(w * 0.5, h * 0.5, w * 0.32, 0, 2 * Math.PI);
@@ -629,6 +656,41 @@ Rectangle {
                     }
                 }
             }
+        }
+
+        // Low battery at arrival (EV, <= 10%): a red pill above the trip card that
+        // opens nearby charging stations.
+        Rectangle {
+            id: lowBattCard
+            readonly property int pct: root.navMap ? root.navMap.evArrivalPct : -1
+            visible: root.navigating && pct >= 0 && pct <= 10
+            anchors.left: tripCard.left; anchors.bottom: tripCard.top; anchors.bottomMargin: root.pad * 0.5
+            height: Math.round(root.unit * 0.075)
+            width: lowBattRow.width + height * 0.7
+            radius: height / 2
+            color: lowBattArea.pressed ? "#c62d24" : "#e5392f"
+            Row {
+                id: lowBattRow
+                anchors.centerIn: parent
+                spacing: lowBattCard.height * 0.15
+                Loader {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: lowBattCard.height * 0.62; height: width
+                    sourceComponent: iconPainter
+                    onLoaded: { item.name = "bolt"; item.col = "white" }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: "white"; font.bold: true; font.pixelSize: lowBattCard.height * 0.36
+                    text: "Arriving with " + lowBattCard.pct + "%"
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: "#ffe1de"; font.pixelSize: lowBattCard.height * 0.32
+                    text: "·  Find chargers"
+                }
+            }
+            MouseArea { id: lowBattArea; anchors.fill: parent; onClicked: root.openChargers() }
         }
 
         // trip card (shown when navigating): a compact dark card like Android
@@ -1317,8 +1379,9 @@ Rectangle {
         // The keyboard stays tucked away while the saved-places list is showing
         // (so the whole list fits); tapping the query line brings it up.
         property bool kbForced: false
-        readonly property bool kbShown: kbForced || root.searchText.length > 0 || root.pickPlace !== ""
-                                        || !root.havePlaces
+        readonly property bool kbShown: !root.chargerMode
+                                        && (kbForced || root.searchText.length > 0 || root.pickPlace !== ""
+                                            || !root.havePlaces)
         onVisibleChanged: if (!visible) kbForced = false
 
         // debounce live geocoding as the user types
@@ -1340,9 +1403,10 @@ Rectangle {
                 anchors.left: parent.left; anchors.right: cancelBtn.left; anchors.rightMargin: root.pad
                 anchors.verticalCenter: parent.verticalCenter
                 elide: Text.ElideLeft
-                color: root.searchText.length ? root.fg : root.dim
+                color: (root.searchText.length || root.chargerMode) ? root.fg : root.dim
                 font.pixelSize: parent.height * 0.5
-                text: root.searchText.length ? root.searchText
+                text: root.chargerMode ? "Charging stations nearby"
+                      : root.searchText.length ? root.searchText
                       : root.pickPlace === "home" ? "Search for your home address"
                       : root.pickPlace === "work" ? "Search for your work address"
                       : searchOverlay.kbShown ? "Type a destination" : "Tap to type a destination"
@@ -1350,7 +1414,7 @@ Rectangle {
             MouseArea {
                 anchors.left: parent.left; anchors.right: cancelBtn.left
                 anchors.top: parent.top; anchors.bottom: parent.bottom
-                onClicked: searchOverlay.kbForced = true
+                onClicked: if (!root.chargerMode) searchOverlay.kbForced = true
             }
             Rectangle {
                 id: cancelBtn
@@ -1363,6 +1427,7 @@ Rectangle {
                     onClicked: {
                         root.searchText = ""
                         if (root.pickPlace) root.pickPlace = ""   // back to the places list
+                        else if (root.chargerMode) root.chargerMode = false
                         else root.searching = false
                     }
                 }
@@ -1372,7 +1437,7 @@ Rectangle {
         // --- saved places (shown until the user types): Home, Work, recents ---
         ListView {
             id: placesList
-            visible: root.havePlaces && root.searchText.length < 2 && !root.pickPlace
+            visible: root.havePlaces && root.searchText.length < 2 && !root.pickPlace && !root.chargerMode
             anchors.left: parent.left; anchors.right: parent.right
             anchors.top: queryRow.bottom; anchors.topMargin: root.pad
             anchors.bottom: searchOverlay.kbShown ? keyboard.top : parent.bottom; anchors.bottomMargin: root.pad
@@ -1383,6 +1448,8 @@ Rectangle {
                 var pl = carScreen.places, out = []
                 out.push({ kind: "home", icon: "home", title: "Home", place: pl.home || null })
                 out.push({ kind: "work", icon: "work", title: "Work", place: pl.work || null })
+                if (carScreen.evElectric)
+                    out.push({ kind: "chargers", icon: "bolt", title: "Charging stations nearby", place: null })
                 var rec = carScreen.recentPlaces || []
                 for (var i = 0; i < rec.length; i++)
                     out.push({ kind: "recent", icon: "recent", index: i, place: rec[i],
@@ -1399,7 +1466,11 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     width: parent.height * 0.5; height: width
                     sourceComponent: iconPainter
-                    onLoaded: { item.name = modelData.icon; item.col = modelData.kind === "recent" ? root.dim : root.accent }
+                    onLoaded: {
+                        item.name = modelData.icon
+                        item.col = modelData.kind === "recent" ? root.dim
+                                 : modelData.kind === "chargers" ? root.accent2 : root.accent
+                    }
                 }
                 Column {
                     anchors.left: plIcon.right; anchors.leftMargin: root.pad
@@ -1416,6 +1487,7 @@ Rectangle {
                         visible: text.length > 0
                         text: modelData.kind === "recent"
                               ? modelData.place.label.split(",").slice(2, 4).join(",").trim()
+                              : modelData.kind === "chargers" ? "From OpenStreetMap, within 25 km"
                               : (saved ? modelData.place.label : "Tap to set")
                     }
                 }
@@ -1424,11 +1496,13 @@ Rectangle {
                     id: plArea
                     anchors.fill: parent
                     onClicked: {
-                        if (saved) root.goToPlace(modelData.place, modelData.kind === "recent")
+                        if (modelData.kind === "chargers") root.openChargers()
+                        else if (saved) root.goToPlace(modelData.place, modelData.kind === "recent")
                         else root.pickPlace = modelData.kind     // Home/Work not set yet: pick it
                     }
                     // Hold: change Home/Work, or forget a recent destination.
                     onPressAndHold: {
+                        if (modelData.kind === "chargers") return
                         if (modelData.kind === "recent") carScreen.removeRecentPlace(modelData.index)
                         else root.pickPlace = modelData.kind
                     }
@@ -1445,16 +1519,25 @@ Rectangle {
             anchors.leftMargin: root.pad; anchors.rightMargin: root.pad
             clip: true
             visible: !placesList.visible
-            model: root.navMap ? root.navMap.geocodeModel : null
+            model: !root.navMap ? null : root.chargerMode ? root.navMap.chargerModel : root.navMap.geocodeModel
             delegate: Rectangle {
                 width: results.width; height: root.unit * 0.1
                 color: resArea.pressed ? root.surface2 : "transparent"
-                Text {
+                Column {
                     anchors.left: parent.left; anchors.right: distText.left
                     anchors.leftMargin: root.pad; anchors.rightMargin: root.pad
                     anchors.verticalCenter: parent.verticalCenter
-                    elide: Text.ElideRight; color: root.fg; font.pixelSize: root.unit * 0.032
-                    text: modelData.address.text
+                    Text {
+                        width: parent.width
+                        elide: Text.ElideRight; color: root.fg; font.pixelSize: root.unit * 0.032
+                        text: modelData.address.text
+                    }
+                    // Charger details (power, points, operator).
+                    Text {
+                        width: parent.width; visible: text.length > 0
+                        elide: Text.ElideRight; color: root.dim; font.pixelSize: root.unit * 0.025
+                        text: modelData.sub || ""
+                    }
                 }
                 // Distance from here (results are sorted nearest-first).
                 Text {
@@ -1478,16 +1561,19 @@ Rectangle {
                             return
                         }
                         if (root.navMap) root.navMap.navigateTo(c, label)
-                        if (root.havePlaces) carScreen.addRecentPlace(label, c.latitude, c.longitude)
+                        if (root.havePlaces && !root.chargerMode) carScreen.addRecentPlace(label, c.latitude, c.longitude)
                         root.searching = false; root.searchText = ""
                     }
                 }
             }
             Text {
                 anchors.centerIn: parent
-                visible: results.count === 0 && root.searchText.length >= 2
+                visible: results.count === 0 && (root.chargerMode || root.searchText.length >= 2)
                 color: root.dim; font.pixelSize: root.unit * 0.032
-                text: (root.navMap && root.navMap.searching) ? "Searching…" : "No results"
+                text: root.chargerMode
+                      ? ((root.navMap && root.navMap.chargerSearching) ? "Looking for chargers…"
+                                                                       : "No chargers found within 25 km")
+                      : (root.navMap && root.navMap.searching) ? "Searching…" : "No results"
             }
         }
 

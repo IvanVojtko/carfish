@@ -209,6 +209,12 @@ int main(int argc, char **argv)
         screen.seedPlaces();
     view.rootContext()->setContextProperty(QStringLiteral("previewPlaces"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_PLACES")));
+    // PREVIEW_EV_PCT=<n> sets the EV charge used by the nav preview (low-battery
+    // warning below ~10% at arrival); PREVIEW_CHARGERS=1 opens nearby chargers.
+    view.rootContext()->setContextProperty(QStringLiteral("previewEvPct"),
+                                           QString::fromLocal8Bit(qgetenv("PREVIEW_EV_PCT")));
+    view.rootContext()->setContextProperty(QStringLiteral("previewChargers"),
+                                           QString::fromLocal8Bit(qgetenv("PREVIEW_CHARGERS")));
     view.rootContext()->setContextProperty(QStringLiteral("previewSearchText"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_SEARCH_TEXT")));
     // PREVIEW_NAV=1 runs the no-input nav self-test (shows the turn + arrival bars).
