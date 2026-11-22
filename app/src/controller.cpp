@@ -444,15 +444,27 @@ void Controller::start(int mode)
         setState(tr("Waiting for the car (USB)"));
         m_usbHelper = new UsbHelperClient(this);
         connect(m_usbHelper, &UsbHelperClient::log, this, &Controller::appendLog);
+        m_usbSwitchTimer.setSingleShot(true);
+        m_usbSwitchTimer.setInterval(12000);
+        m_usbSwitchTimer.disconnect(this);
+        connect(&m_usbSwitchTimer, &QTimer::timeout, this, [this] {
+            appendLog(tr("USB: the switch to accessory mode did not finish within 12 s "
+                         "(phone USB stuck?). Unplug and replug the cable; details: "
+                         "devel-su journalctl -b -u carfish-helper"));
+            setState(tr("USB switch stuck: replug the cable"));
+        });
         connect(m_usbHelper, &UsbHelperClient::startRequested, this, [this](const QString &model) {
             appendLog(tr("USB: car started Android Auto (%1)").arg(model));
             setState(tr("Switching USB to accessory mode"));
+            m_usbSwitchTimer.start();
         });
         connect(m_usbHelper, &UsbHelperClient::failed, this, [this](const QString &r) {
+            m_usbSwitchTimer.stop();
             appendLog(tr("USB bring-up failed: %1").arg(r));
             setState(tr("Waiting for the car (USB)"));
         });
         connect(m_usbHelper, &UsbHelperClient::ready, this, [this](const QString &ffsDir) {
+            m_usbSwitchTimer.stop();
             appendLog(tr("USB accessory gadget ready (%1)").arg(ffsDir));
             startSession(new UsbFfsTransport(ffsDir, this));
         });
@@ -598,6 +610,7 @@ void Controller::endSession(const QString &reason)
         m_wireless->deleteLater();
         m_wireless = nullptr;
     }
+    m_usbSwitchTimer.stop();
     if (m_usbHelper) {
         m_usbHelper->stop(); // restores usb-moded / the normal USB gadget
         m_usbHelper->deleteLater();

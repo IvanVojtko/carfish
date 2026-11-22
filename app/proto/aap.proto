@@ -275,9 +275,15 @@ message Service {
     optional NavigationStatusService navigation_status_service = 8;
     optional MediaPlaybackStatusService media_playback_service = 9;
     optional PhoneStatusService phone_status_service = 10;
-    // 6 bluetooth, 7 radio,
-    // 11 media browser, 12 vendor extension, 13 notification,
-    // 14 wifi projection: not used yet.
+    // Not used, only detected (for the "head unit services" log line). Each is
+    // a sub-message on the wire; parsing it as bytes keeps has_*() working
+    // without modelling the contents.
+    optional bytes bluetooth_service = 6;
+    optional bytes radio_service = 7;
+    optional bytes media_browser_service = 11;
+    optional bytes vendor_extension_service = 12;
+    optional bytes notification_service = 13;
+    optional bytes wifi_projection_service = 14;   // head unit supports wireless AA
 }
 
 // Now playing for the car's own screens (cluster / native media display). The

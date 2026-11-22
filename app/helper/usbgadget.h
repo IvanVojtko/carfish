@@ -3,6 +3,8 @@
 #include <QByteArray>
 #include <QDBusAbstractAdaptor>
 #include <QObject>
+#include <QPointer>
+#include <QList>
 #include <QString>
 #include <QStringList>
 #include <QThread>
@@ -74,6 +76,10 @@ private:
     // Restore usb-moded's gadget.
     void restore();
 
+    // Write the gadget's UDC file with a timeout (see writeUdc in the .cpp).
+    bool setUdc(const QString &gadget, const QString &udc, const char *why);
+    bool m_udcStuck = false;   // a UDC write of ours never returned
+
     std::atomic_bool m_stop{false};
 
     // Gadget bits we need to clean up.
@@ -109,6 +115,9 @@ signals:
 
 private:
     UsbGadgetWorker *m_worker = nullptr;
+    // Workers that did not stop in time (blocked in the kernel); they delete
+    // themselves when they finish. New attempts refuse to start meanwhile.
+    QList<QPointer<UsbGadgetWorker>> m_abandoned;
 };
 
 // D-Bus face of UsbGadget (interface org.carfish.Usb1).

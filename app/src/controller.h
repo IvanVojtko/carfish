@@ -149,6 +149,9 @@ private:
     QQmlNetworkAccessManagerFactory *m_namFactory = nullptr; // sets the OSM User-Agent
     WirelessSetup *m_wireless = nullptr;
     UsbHelperClient *m_usbHelper = nullptr; // wired AA: privileged gadget switch
+    // Started when the car requests Android Auto over USB; fires if the helper
+    // never reports ready/failed (a gadget switch stuck in the kernel).
+    QTimer m_usbSwitchTimer;
     QPointer<Transport> m_transport;
     QPointer<aap::Session> m_session;
 

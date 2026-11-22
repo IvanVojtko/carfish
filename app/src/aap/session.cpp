@@ -331,6 +331,32 @@ void Session::onServiceDiscovery(const QByteArray &body)
             .arg(QString::fromStdString(resp.make()), QString::fromStdString(resp.model()),
                  QString::fromStdString(resp.head_unit_make()), QString::fromStdString(resp.head_unit_model())));
 
+    // One line listing everything the head unit offers (what we use and what
+    // we don't), so a log from a user's car answers "does it support X?".
+    {
+        QStringList names;
+        bool wifi = false;
+        for (const Service &svc : resp.services()) {
+            if (svc.has_media_sink_service())
+                names << (svc.media_sink_service().video_configs_size() > 0 ? tr("video") : tr("audio"));
+            if (svc.has_sensor_source_service()) names << tr("sensors");
+            if (svc.has_input_source_service()) names << tr("input");
+            if (svc.has_media_source_service()) names << tr("mic");
+            if (svc.has_navigation_status_service()) names << tr("cluster nav");
+            if (svc.has_media_playback_service()) names << tr("now playing");
+            if (svc.has_phone_status_service()) names << tr("phone status");
+            if (svc.has_bluetooth_service()) names << tr("bluetooth");
+            if (svc.has_radio_service()) names << tr("radio");
+            if (svc.has_media_browser_service()) names << tr("media browser");
+            if (svc.has_vendor_extension_service()) names << tr("vendor extension");
+            if (svc.has_notification_service()) names << tr("notifications");
+            if (svc.has_wifi_projection_service()) { names << tr("wifi projection"); wifi = true; }
+        }
+        log(tr("head unit services: %1").arg(names.join(QStringLiteral(", "))));
+        log(wifi ? tr("head unit supports wireless Android Auto (wifi projection service)")
+                 : tr("head unit does not advertise wireless Android Auto (no wifi projection service): wired only"));
+    }
+
     for (const Service &svc : resp.services()) {
         const quint8 ch = quint8(svc.id());
         if (svc.has_media_sink_service()) {
@@ -390,12 +416,26 @@ void Session::onServiceDiscovery(const QByteArray &body)
                 m_sensorsAvailable.insert(ss.sensors(i).sensor_type());
                 types << QString::number(ss.sensors(i).sensor_type());
             }
-            for (int i = 0; i < ss.supported_fuel_types_size(); ++i)
-                if (ss.supported_fuel_types(i) == 10) // FUEL_TYPE_ELECTRIC
-                    m_evCar = true;
-            log(tr("head unit sensors: %1%2")
+            // Battery-electric only when ELECTRIC (10) is listed and no burnable
+            // fuel is: a plug-in hybrid (e.g. Peugeot 508 Hybrid lists petrol +
+            // electric) would otherwise get "arriving with 0%" warnings once its
+            // short electric range runs out, though it still has fuel.
+            bool electric = false, combustion = false;
+            QStringList fuels;
+            for (int i = 0; i < ss.supported_fuel_types_size(); ++i) {
+                const int f = ss.supported_fuel_types(i);
+                fuels << QString::number(f);
+                if (f == 10) // FUEL_TYPE_ELECTRIC
+                    electric = true;
+                else if ((f >= 1 && f <= 9) || f == 11) // petrol, diesel, LPG/CNG/LNG, hydrogen
+                    combustion = true;
+            }
+            m_evCar = electric && !combustion;
+            log(tr("head unit sensors: %1%2%3")
                     .arg(types.isEmpty() ? tr("(none)") : types.join(QLatin1Char(' ')),
-                         m_evCar ? tr(" [electric car]") : QString()));
+                         fuels.isEmpty() ? QString() : tr(", fuel types %1").arg(fuels.join(QLatin1Char(' '))),
+                         m_evCar ? tr(" [electric car]")
+                                 : (electric ? tr(" [plug-in hybrid: not treated as electric]") : QString())));
         } else if (svc.has_media_source_service() && m_micChannel < 0) {
             // The car's microphone is advertised as a MediaSource. We open it on
             // demand (e.g. a steering-wheel voice button), not at startup.

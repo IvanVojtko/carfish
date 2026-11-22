@@ -102,6 +102,38 @@ void BluezProfile::connectDevice(const QString &devicePath)
     });
 }
 
+// Why a paired device clearly isn't a car, from its Bluetooth Class of Device,
+// or an empty string when it may be one (car audio, hands-free, or unknown).
+// Used only for the fallback when no device advertises the AA UUID, so we
+// don't page the user's headphones, watch or laptop on every attempt.
+static QString notACarReason(quint32 cls)
+{
+    if (cls == 0)
+        return QString(); // class unknown: could be the car
+    const quint32 major = (cls >> 8) & 0x1f;
+    const quint32 minor = (cls >> 2) & 0x3f;
+    switch (major) {
+    case 1: return QStringLiteral("computer");
+    case 2: return QStringLiteral("phone");
+    case 5: return QStringLiteral("keyboard/mouse");
+    case 6: return QStringLiteral("printer/camera");
+    case 7: return QStringLiteral("wearable");
+    case 8: return QStringLiteral("toy");
+    case 9: return QStringLiteral("health device");
+    case 4: // audio/video: keep hands-free (2) and car audio (8)
+        switch (minor) {
+        case 1: return QStringLiteral("headset");
+        case 5: return QStringLiteral("loudspeaker");
+        case 6: return QStringLiteral("headphones");
+        case 7: return QStringLiteral("portable audio");
+        case 12: case 13: case 14: case 15: case 16: return QStringLiteral("video device");
+        default: return QString();
+        }
+    default:
+        return QString();
+    }
+}
+
 void BluezProfile::connectKnownHeadUnits()
 {
     if (m_fd >= 0) {
@@ -119,7 +151,8 @@ void BluezProfile::connectKnownHeadUnits()
 
     const QDBusArgument arg = reply.arguments().first().value<QDBusArgument>();
     QStringList aaDevices;   // advertise the AA UUID
-    QStringList allPaired;   // paired fallback
+    QStringList allPaired;   // paired fallback (devices that may be a car)
+    QStringList skipped;     // paired, but clearly not a car
     arg.beginMap(); // a{oa{sa{sv}}}
     while (!arg.atEnd()) {
         arg.beginMapEntry();
@@ -131,7 +164,12 @@ void BluezProfile::connectKnownHeadUnits()
         const QVariantMap dev = ifaces.value(QStringLiteral("org.bluez.Device1"));
         if (dev.isEmpty() || !dev.value(QStringLiteral("Paired")).toBool())
             continue;
-        allPaired << path.path();
+        const QString name = dev.value(QStringLiteral("Alias"), dev.value(QStringLiteral("Name"))).toString();
+        const QString why = notACarReason(dev.value(QStringLiteral("Class")).toUInt());
+        if (why.isEmpty())
+            allPaired << path.path();
+        else
+            skipped << QStringLiteral("%1 (%2)").arg(name, why);
         const QStringList uuids = dev.value(QStringLiteral("UUIDs")).toStringList();
         for (const QString &u : uuids) {
             if (u.compare(kAndroidAutoUuid, Qt::CaseInsensitive) == 0
@@ -144,9 +182,17 @@ void BluezProfile::connectKnownHeadUnits()
     arg.endMap();
 
     const QStringList &targets = aaDevices.isEmpty() ? allPaired : aaDevices;
-    if (aaDevices.isEmpty())
-        emit log(QStringLiteral("no paired device advertises the AA UUID; trying all %1 paired device(s)")
+    if (aaDevices.isEmpty()) {
+        emit log(QStringLiteral("no paired device advertises the AA UUID; trying %1 paired device(s) that may be a car")
                      .arg(allPaired.size()));
+        const QString sk = skipped.join(QStringLiteral(", "));
+        if (!sk.isEmpty() && sk != m_lastSkipped)
+            emit log(QStringLiteral("not trying: %1").arg(sk));
+        m_lastSkipped = sk;
+        if (allPaired.isEmpty())
+            emit log(QStringLiteral("no paired car found; pair the car over Bluetooth first "
+                                    "(and check it supports wireless Android Auto)"));
+    }
     else
         emit log(QStringLiteral("found %1 AA-capable paired device(s)").arg(aaDevices.size()));
 

@@ -51,6 +51,7 @@ private:
 
     bool m_registered = false;
     int m_fd = -1;
+    QString m_lastSkipped;   // "not trying: …" is logged only when it changes
     QSocketNotifier *m_notifier = nullptr;
     QString m_device;
 };

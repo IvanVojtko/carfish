@@ -7,8 +7,16 @@
 #include <QTimer>
 #include <QProcess>
 
+#include <QDebug>
+#include <QPointer>
+
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <future>
+#include <memory>
+#include <thread>
 #include <fcntl.h>
 #include <pwd.h>
 #include <sys/ioctl.h>
@@ -69,6 +77,41 @@ static void runCmd(const QString &program, const QStringList &args, int timeoutM
     p.waitForFinished(timeoutMs);
 }
 
+// Writing a gadget's UDC file (bind/unbind) can block inside the kernel; seen
+// in the field right after a car's AOA START on reconnect, which froze the
+// worker for good (no log, no restore, usb-moded left stopped). Do the write
+// on a throwaway thread and stop waiting after timeoutMs so we can report and
+// clean up instead. A write that never returns leaks its thread; while one is
+// outstanding g_udcStuck stays set and new attempts refuse to start (any
+// further UDC write would just queue behind the same kernel lock).
+static std::atomic_bool g_udcStuck{false};
+
+enum class UdcResult { Ok, Failed, TimedOut };
+
+static UdcResult writeUdc(const QString &gadget, const QString &value, int timeoutMs, qint64 *tookMs)
+{
+    QElapsedTimer t;
+    t.start();
+    if (g_udcStuck.load()) {
+        *tookMs = 0;
+        return UdcResult::TimedOut;
+    }
+    auto result = std::make_shared<std::promise<bool>>();
+    std::future<bool> done = result->get_future();
+    const QString path = gadget + QStringLiteral("/UDC");
+    g_udcStuck.store(true);
+    std::thread([result, path, value] {
+        const bool ok = writeStr(path, value);
+        g_udcStuck.store(false);
+        result->set_value(ok);
+    }).detach();
+    const bool finished = done.wait_for(std::chrono::milliseconds(timeoutMs)) == std::future_status::ready;
+    *tookMs = t.elapsed();
+    if (!finished)
+        return UdcResult::TimedOut; // g_udcStuck stays set until the write returns
+    return done.get() ? UdcResult::Ok : UdcResult::Failed;
+}
+
 static bool serviceActive(const QString &unit)
 {
     QProcess p;
@@ -77,9 +120,41 @@ static bool serviceActive(const QString &unit)
     return p.exitCode() == 0;
 }
 
+static bool serviceEnabled(const QString &unit)
+{
+    QProcess p;
+    p.start(QStringLiteral("systemctl"), { QStringLiteral("is-enabled"), QStringLiteral("--quiet"), unit });
+    p.waitForFinished(5000);
+    return p.exitCode() == 0;   // enabled / static / alias / indirect
+}
+
 // ---------------------------------------------------------------------------
 // UsbGadgetWorker
 // ---------------------------------------------------------------------------
+// Bind (udc = controller name) or unbind (udc empty) the gadget with a 5 s
+// limit, logging slow or stuck writes. False when it failed or got stuck.
+bool UsbGadgetWorker::setUdc(const QString &gadget, const QString &udc, const char *why)
+{
+    const QString what = udc.isEmpty() ? QStringLiteral("unbind") : QStringLiteral("bind");
+    qint64 took = 0;
+    const UdcResult r = writeUdc(gadget, udc, 5000, &took);
+    if (r == UdcResult::TimedOut) {
+        m_udcStuck = true;
+        emit log(QStringLiteral("usb: UDC %1 (%2) is stuck in the kernel (no return after %3 ms); "
+                                "unplug the USB cable, or reboot the phone if that does not help")
+                     .arg(what, QLatin1String(why)).arg(took));
+        return false;
+    }
+    if (took > 1000)
+        emit log(QStringLiteral("usb: UDC %1 (%2) took %3 ms").arg(what, QLatin1String(why)).arg(took));
+    if (r == UdcResult::Failed) {
+        emit log(QStringLiteral("usb: UDC %1 (%2) failed (%3)")
+                     .arg(what, QLatin1String(why), udc.isEmpty() ? QStringLiteral("not bound?") : udc));
+        return false;
+    }
+    return true;
+}
+
 UsbGadgetWorker::UsbGadgetWorker(QObject *parent)
     : QThread(parent)
 {
@@ -162,14 +237,15 @@ void UsbGadgetWorker::linkAskAccessory(const QString &gadget, const QString &con
     // configfs resolves the symlink target against the process CWD, so use an
     // ABSOLUTE target (a relative one fails with ENOENT since the helper's CWD
     // is not the gadget dir, and chdir() is unsafe with the D-Bus main thread).
-    writeStr(gadget + QStringLiteral("/UDC"), QString());
+    if (!setUdc(gadget, QString(), "relink accessory"))
+        return;
     QThread::msleep(150);
     const QByteArray fnTarget = (gadget + QStringLiteral("/functions/") + fn).toLocal8Bit();
     if (::symlink(fnTarget.constData(), link.toLocal8Bit().constData()) != 0 && errno != EEXIST)
         emit log(QStringLiteral("usb: link accessory failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
     else
         emit log(QStringLiteral("usb: linked %1 so the car's GET_PROTOCOL is answered").arg(fn));
-    writeStr(gadget + QStringLiteral("/UDC"), udc);
+    setUdc(gadget, udc, "relink accessory");
 }
 
 static int ioctlStart(int fd)
@@ -398,8 +474,13 @@ bool UsbGadgetWorker::buildAccessoryGadget(const QString &gadget, const QString 
     m_savedProduct = readFileRaw(gadget + QStringLiteral("/idProduct"));
 
     // Drop the pullup immediately so the host sees us leave the bus inside the
-    // AOA exchange, then re-shape the gadget.
-    writeStr(gadget + QStringLiteral("/UDC"), QString());
+    // AOA exchange, then re-shape the gadget. Each step is logged so a field
+    // log shows exactly where a failed switch stopped.
+    emit log(QStringLiteral("usb: switching gadget: unbinding from the car"));
+    if (!setUdc(gadget, QString(), "leave bus for accessory switch")) {
+        *err = QStringLiteral("unbind UDC stuck or failed");
+        return false;
+    }
     QThread::msleep(100);
 
     // Remove every function symlink from the config (we want ONLY our ffs iface;
@@ -433,8 +514,11 @@ bool UsbGadgetWorker::buildAccessoryGadget(const QString &gadget, const QString 
         }
     }
 
+    emit log(QStringLiteral("usb: switching gadget: 18d1:2d00, functionfs mounted at %1").arg(dir));
+
     if (!writeFfsDescriptors(dir, err))
         return false;
+    emit log(QStringLiteral("usb: switching gadget: FunctionFS descriptors written"));
 
     // Link ffs.aa into the config. configfs resolves the symlink target against
     // the process CWD, so the target must be ABSOLUTE (a relative one fails with
@@ -451,10 +535,14 @@ bool UsbGadgetWorker::buildAccessoryGadget(const QString &gadget, const QString 
     exposeEndpoints(dir);
 
     // Bind the UDC: clear then set, so the host sees a fresh enumeration.
-    writeStr(gadget + QStringLiteral("/UDC"), QString());
+    emit log(QStringLiteral("usb: switching gadget: binding to the car as an accessory"));
+    if (!setUdc(gadget, QString(), "before accessory bind")) {
+        *err = QStringLiteral("unbind UDC stuck or failed");
+        return false;
+    }
     QThread::msleep(100);
-    if (!writeStr(gadget + QStringLiteral("/UDC"), udc)) {
-        *err = QStringLiteral("bind UDC %1: %2").arg(udc, QString::fromLocal8Bit(strerror(errno)));
+    if (!setUdc(gadget, udc, "accessory")) {
+        *err = QStringLiteral("bind UDC %1 stuck or failed").arg(udc);
         return false;
     }
 
@@ -472,8 +560,11 @@ void UsbGadgetWorker::restore()
     if (m_gadget.isEmpty())
         return;
     emit log(QStringLiteral("usb: restoring gadget"));
-    // Unbind and strip our FunctionFS additions.
-    writeStr(m_gadget + QStringLiteral("/UDC"), QString());
+    // Unbind and strip our FunctionFS additions. If the UDC is stuck in the
+    // kernel, skip the unbind (it would only queue behind it) but still put
+    // usb-moded back so normal USB returns once the kernel recovers.
+    if (!m_udcStuck)
+        setUdc(m_gadget, QString(), "restore");
     QThread::msleep(150);
     if (m_ep0 >= 0) {
         ::close(m_ep0); // releases FunctionFS so the mount can go
@@ -514,7 +605,7 @@ bool UsbGadgetWorker::gadgetIsAccessoryLeftover(const QString &gadget)
 void UsbGadgetWorker::resetLeftoverAccessory(const QString &gadget)
 {
     emit log(QStringLiteral("usb: resetting a leftover accessory gadget from an interrupted session"));
-    writeStr(gadget + QStringLiteral("/UDC"), QString());
+    setUdc(gadget, QString(), "reset leftover");
     QThread::msleep(150);
     QDir cfgRoot(gadget + QStringLiteral("/configs"));
     for (const QString &c : cfgRoot.entryList(QDir::Dirs | QDir::NoDotAndDotDot))
@@ -561,6 +652,12 @@ void UsbGadgetWorker::run()
     }
     // Re-read the UDC after stopping usb-moded (it may have unbound the gadget).
     linkAskAccessory(m_gadget, m_config, m_udc);
+    if (m_udcStuck) {
+        emit failed(QStringLiteral("the phone's USB controller is stuck: unplug the cable and plug it back in"));
+        restore();
+        emit stopped();
+        return;
+    }
 
     emit log(QStringLiteral("usb: waiting for the car to start Android Auto (AOA)"));
     QString model, serial;
@@ -576,6 +673,7 @@ void UsbGadgetWorker::run()
 
     QString ffsDir, err;
     if (!buildAccessoryGadget(m_gadget, m_config, m_udc, &ffsDir, &err)) {
+        emit log(QStringLiteral("usb: accessory switch failed: %1").arg(err));
         emit failed(QStringLiteral("usb: build accessory gadget: %1").arg(err));
         restore();
         emit stopped();
@@ -599,6 +697,11 @@ void UsbGadgetWorker::run()
 UsbGadget::UsbGadget(QObject *parent)
     : QObject(parent)
 {
+    // Everything also goes to the journal (journalctl -u carfish-helper): the
+    // D-Bus Log signal only reaches the app while it is listening, so lines
+    // from a stop/teardown or a stuck attempt were lost from ~/carfish.log.
+    connect(this, &UsbGadget::log, this, [](const QString &l) { qInfo().noquote() << l; });
+    connect(this, &UsbGadget::failed, this, [](const QString &r) { qWarning().noquote() << "usb: failed:" << r; });
     // On helper startup, recover daily USB if a previous session was interrupted
     // (e.g. the helper was restarted by a package upgrade) and left the gadget as
     // our 18d1:2d00 accessory. Done after the event loop starts so it never
@@ -612,10 +715,20 @@ UsbGadget::UsbGadget(QObject *parent)
                                                             : root + QLatin1Char('/') + gs.first();
         const bool is2d00 = readTrim(g + QStringLiteral("/idProduct")).contains(QLatin1String("2d00"));
         const bool hasFfs = QFileInfo::exists(g + QStringLiteral("/functions/ffs.aa"));
-        if (!is2d00 && !hasFfs)
+        if (!is2d00 && !hasFfs) {
+            // A previous helper may have died mid-switch after stopping
+            // usb-moded but before building anything: the phone then has no
+            // normal USB (charging/MTP mode) until usb-moded runs again.
+            const QString unit = QStringLiteral("usb-moded");
+            if (!serviceActive(unit) && serviceEnabled(unit)) {
+                emit log(QStringLiteral("usb: usb-moded was left stopped by an interrupted session; restarting it"));
+                runCmd(QStringLiteral("systemctl"), { QStringLiteral("restart"), unit });
+            }
             return;
+        }
         emit log(QStringLiteral("usb: recovering normal USB from a leftover accessory gadget at startup"));
-        writeStr(g + QStringLiteral("/UDC"), QString());
+        qint64 took = 0;
+        writeUdc(g, QString(), 5000, &took);
         QThread::msleep(150);
         for (const QString &c : QDir(g + QStringLiteral("/configs")).entryList(QDir::Dirs | QDir::NoDotAndDotDot))
             ::unlink((g + QStringLiteral("/configs/") + c + QStringLiteral("/ffs.aa")).toLocal8Bit().constData());
@@ -634,6 +747,18 @@ void UsbGadget::start()
 {
     if (m_worker && m_worker->isRunning())
         return;
+    // An earlier attempt is still blocked in the kernel: a new one would block
+    // behind it, so say so instead of failing silently.
+    bool oldStuck = g_udcStuck.load();
+    for (const QPointer<UsbGadgetWorker> &w : m_abandoned)
+        if (w && w->isRunning())
+            oldStuck = true;
+    if (oldStuck) {
+        emit log(QStringLiteral("usb: a previous USB switch is still stuck in the kernel; not starting"));
+        emit failed(QStringLiteral("the phone's USB is stuck from the previous attempt: unplug the cable "
+                                   "and plug it back in (reboot the phone if that does not help)"));
+        return;
+    }
     if (m_worker) {
         m_worker->deleteLater();
         m_worker = nullptr;
@@ -651,7 +776,25 @@ void UsbGadget::stop()
     if (!m_worker)
         return;
     m_worker->requestStop();
-    m_worker->wait(8000);
+    if (!m_worker->wait(8000)) {
+        // Deleting a running QThread aborts the whole helper (and a crash left
+        // the gadget half-switched with usb-moded stopped). Let it finish on
+        // its own instead: it restores the gadget once its blocked call
+        // returns. Its late ready/failed must not be mistaken for a new
+        // attempt's, so only its log stays connected.
+        UsbGadgetWorker *w = m_worker;
+        m_worker = nullptr;
+        emit log(QStringLiteral("usb: the USB worker did not stop within 8 s (blocked in the kernel); "
+                                "leaving it to finish and clean up on its own"));
+        disconnect(w, nullptr, this, nullptr);
+        connect(w, &UsbGadgetWorker::log, this, [this](const QString &l) {
+            emit log(QStringLiteral("(previous attempt) ") + l);
+        });
+        connect(w, &QThread::finished, w, &QObject::deleteLater);
+        w->setParent(nullptr);
+        m_abandoned << w;
+        return;
+    }
     m_worker->deleteLater();
     m_worker = nullptr;
 }
