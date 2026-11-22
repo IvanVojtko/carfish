@@ -4,6 +4,9 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QRegExp>
 #include <QTimer>
 #include <QProcess>
 
@@ -128,6 +131,61 @@ static bool serviceEnabled(const QString &unit)
     return p.exitCode() == 0;   // enabled / static / alias / indirect
 }
 
+// The phone's own USB vendor id. Our accessory gadget is 18d1:2d00, and
+// usb-moded only ever rewrites idProduct, never idVendor, so a session that
+// ended without a clean restore (or a quick second attempt that snapshotted our
+// own 18d1 as "the original") left the phone presenting as Google 18d1 until
+// reboot. The ask phase then took the "18d1 answers GET_PROTOCOL directly"
+// shortcut and no longer reconnected to the car, and cars stopped starting
+// Android Auto (seen with a Hyundai i30N and a Ford). Source of truth: the
+// Android vendor property (MediaTek: vendor.usb.vid=0x0E8D), else the first
+// non-18d1 id this helper saw on the gadget.
+static QString cmdOutput(const QString &program, const QStringList &args, int timeoutMs = 3000)
+{
+    QProcess p;
+    p.start(program, args);
+    if (!p.waitForFinished(timeoutMs))
+        return QString();
+    return QString::fromLatin1(p.readAllStandardOutput()).trimmed();
+}
+
+static bool isGoogleVendor(const QString &id)
+{
+    return id.contains(QLatin1String("18d1"), Qt::CaseInsensitive);
+}
+
+static QString nativeVendor(const QString &gadget)
+{
+    static QMutex mu;
+    static QString cached;
+    QMutexLocker lock(&mu);
+    if (cached.isEmpty()) {
+        const QString prop = cmdOutput(QStringLiteral("getprop"), { QStringLiteral("vendor.usb.vid") });
+        if (QRegExp(QStringLiteral("0x[0-9a-fA-F]{4}")).exactMatch(prop))
+            cached = prop;
+    }
+    if (cached.isEmpty()) {
+        const QString cur = readTrim(gadget + QStringLiteral("/idVendor"));
+        if (!cur.isEmpty() && !isGoogleVendor(cur))
+            cached = cur;
+    }
+    return cached;
+}
+
+// Undo our 18d1 vendor id if it is still on the gadget. Returns a log line
+// when something was done (empty when the id was already right / unknown).
+static QString restoreNativeVendor(const QString &gadget)
+{
+    const QString native = nativeVendor(gadget);
+    const QString cur = readTrim(gadget + QStringLiteral("/idVendor"));
+    if (native.isEmpty() || cur.isEmpty() || !isGoogleVendor(cur) || isGoogleVendor(native))
+        return QString();
+    if (!writeStr(gadget + QStringLiteral("/idVendor"), native))
+        return QStringLiteral("usb: could not put back the phone's USB vendor id %1 (still %2)").arg(native, cur);
+    return QStringLiteral("usb: put back the phone's USB vendor id %1 (an earlier session left it as %2)")
+        .arg(native, cur);
+}
+
 // ---------------------------------------------------------------------------
 // UsbGadgetWorker
 // ---------------------------------------------------------------------------
@@ -216,36 +274,50 @@ QString UsbGadgetWorker::accessoryFunction(const QString &gadget)
 
 void UsbGadgetWorker::linkAskAccessory(const QString &gadget, const QString &config, const QString &udc)
 {
-    // Make the car's AOA GET_PROTOCOL be answered while usb-moded's ask gadget
-    // (or whatever is bound) is enumerated, so the kernel sets the start flag
-    // we poll. On vendor 0x18d1 kernels the device setup hook already answers
+    // Make the car's AOA GET_PROTOCOL be answered, then reconnect so the car
+    // sees the phone arrive fresh and runs the AOA handshake while we watch.
+    // On vendor 0x18d1 kernels the device setup hook already answers
     // (cargadgetd's finding on the Jolla C2); elsewhere the accessory function
-    // must be linked into the config (e.g. MediaTek 0e8d). Skip the disruptive
-    // unbind/relink when we are already 0x18d1.
+    // must be linked into the config (e.g. MediaTek 0e8d).
+    //
+    // Always reconnect, 18d1 or not: by the time we run, the car has usually
+    // already enumerated the phone (and given up on it), and stopping
+    // usb-moded may have taken the gadget off the bus entirely. Every car
+    // start we have seen came right after this unbind/rebind; without it the
+    // car either never sent START (Hyundai i30N) or only a stale one (Ford).
     const QString vendor = readTrim(gadget + QStringLiteral("/idVendor"));
-    if (vendor.contains(QLatin1String("18d1"))) {
-        emit log(QStringLiteral("usb: vendor 0x18d1 answers AOA GET_PROTOCOL directly; no relink"));
-        return;
+    const QString product = readTrim(gadget + QStringLiteral("/idProduct"));
+    const bool bound = !readTrim(gadget + QStringLiteral("/UDC")).isEmpty();
+    emit log(QStringLiteral("usb: gadget id %1:%2, %3")
+                 .arg(vendor, product,
+                      bound ? QStringLiteral("on the bus")
+                            : QStringLiteral("off the bus (usb-moded unbound it)")));
+
+    QString fn, link;
+    if (isGoogleVendor(vendor)) {
+        emit log(QStringLiteral("usb: vendor 0x18d1 answers AOA GET_PROTOCOL directly; no accessory link"));
+    } else {
+        fn = accessoryFunction(gadget);
+        if (!fn.isEmpty())
+            link = gadget + QStringLiteral("/configs/") + config + QLatin1Char('/') + fn;
     }
-    const QString fn = accessoryFunction(gadget);
-    if (fn.isEmpty())
-        return;
-    const QString link = gadget + QStringLiteral("/configs/") + config + QLatin1Char('/') + fn;
-    if (QFileInfo::exists(link))
-        return; // already linked
-    // Unbind, link, rebind so the host re-enumerates with the accessory iface.
-    // configfs resolves the symlink target against the process CWD, so use an
-    // ABSOLUTE target (a relative one fails with ENOENT since the helper's CWD
-    // is not the gadget dir, and chdir() is unsafe with the D-Bus main thread).
-    if (!setUdc(gadget, QString(), "relink accessory"))
+
+    if (bound && !setUdc(gadget, QString(), "reconnect for AOA"))
         return;
     QThread::msleep(150);
-    const QByteArray fnTarget = (gadget + QStringLiteral("/functions/") + fn).toLocal8Bit();
-    if (::symlink(fnTarget.constData(), link.toLocal8Bit().constData()) != 0 && errno != EEXIST)
-        emit log(QStringLiteral("usb: link accessory failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
-    else
-        emit log(QStringLiteral("usb: linked %1 so the car's GET_PROTOCOL is answered").arg(fn));
-    setUdc(gadget, udc, "relink accessory");
+    if (!link.isEmpty() && !QFileInfo::exists(link)) {
+        // configfs resolves the symlink target against the process CWD, so use
+        // an ABSOLUTE target (a relative one fails with ENOENT since the
+        // helper's CWD is not the gadget dir, and chdir() is unsafe with the
+        // D-Bus main thread).
+        const QByteArray fnTarget = (gadget + QStringLiteral("/functions/") + fn).toLocal8Bit();
+        if (::symlink(fnTarget.constData(), link.toLocal8Bit().constData()) != 0 && errno != EEXIST)
+            emit log(QStringLiteral("usb: link accessory failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
+        else
+            emit log(QStringLiteral("usb: linked %1 so the car's GET_PROTOCOL is answered").arg(fn));
+    }
+    if (setUdc(gadget, udc, "reconnect for AOA"))
+        emit log(QStringLiteral("usb: reconnected to the car"));
 }
 
 static int ioctlStart(int fd)
@@ -470,8 +542,13 @@ bool UsbGadgetWorker::buildAccessoryGadget(const QString &gadget, const QString 
     const QString cfgDir = gadget + QStringLiteral("/configs/") + config;
 
     // Snapshot identity for restore.
-    m_savedVendor = readFileRaw(gadget + QStringLiteral("/idVendor"));
-    m_savedProduct = readFileRaw(gadget + QStringLiteral("/idProduct"));
+    // Never take our own 18d1:2d00 as "the original" (a quick retry did, and
+    // restore then wrote 18d1 back for good); the vendor id is put back from
+    // nativeVendor() in restore() anyway.
+    if (!readTrim(gadget + QStringLiteral("/idProduct")).contains(QLatin1String("2d00"))) {
+        m_savedVendor = readFileRaw(gadget + QStringLiteral("/idVendor"));
+        m_savedProduct = readFileRaw(gadget + QStringLiteral("/idProduct"));
+    }
 
     // Drop the pullup immediately so the host sees us leave the bus inside the
     // AOA exchange, then re-shape the gadget. Each step is logged so a field
@@ -580,6 +657,9 @@ void UsbGadgetWorker::restore()
         writeFile(m_gadget + QStringLiteral("/idVendor"), m_savedVendor);
     if (!m_savedProduct.isEmpty())
         writeFile(m_gadget + QStringLiteral("/idProduct"), m_savedProduct);
+    const QString fixed = restoreNativeVendor(m_gadget);
+    if (!fixed.isEmpty())
+        emit log(fixed);
     // Hand the gadget back to usb-moded, which rebuilds its own charging/MTP mode.
     if (m_usbModedStopped) {
         runCmd(QStringLiteral("systemctl"), { QStringLiteral("restart"), QStringLiteral("usb-moded") });
@@ -612,6 +692,9 @@ void UsbGadgetWorker::resetLeftoverAccessory(const QString &gadget)
         ::unlink((gadget + QStringLiteral("/configs/") + c + QStringLiteral("/ffs.aa")).toLocal8Bit().constData());
     ::umount2(QString::fromLatin1(kDefaultFfsDir).toLocal8Bit().constData(), MNT_DETACH);
     ::rmdir((gadget + QStringLiteral("/functions/ffs.aa")).toLocal8Bit().constData());
+    const QString fixed = restoreNativeVendor(gadget);
+    if (!fixed.isEmpty())
+        emit log(fixed);
     // usb-moded rebuilds its own charging/MTP gadget, which re-enumerates us to
     // the car as a normal Android device.
     runCmd(QStringLiteral("systemctl"), { QStringLiteral("restart"), QStringLiteral("usb-moded") });
@@ -650,7 +733,10 @@ void UsbGadgetWorker::run()
         emit log(QStringLiteral("usb: stopped usb-moded"));
         QThread::msleep(300);
     }
-    // Re-read the UDC after stopping usb-moded (it may have unbound the gadget).
+    // An earlier session may have left our Google 18d1 vendor id behind.
+    const QString fixed = restoreNativeVendor(m_gadget);
+    if (!fixed.isEmpty())
+        emit log(fixed);
     linkAskAccessory(m_gadget, m_config, m_udc);
     if (m_udcStuck) {
         emit failed(QStringLiteral("the phone's USB controller is stuck: unplug the cable and plug it back in"));
@@ -716,6 +802,11 @@ UsbGadget::UsbGadget(QObject *parent)
         const bool is2d00 = readTrim(g + QStringLiteral("/idProduct")).contains(QLatin1String("2d00"));
         const bool hasFfs = QFileInfo::exists(g + QStringLiteral("/functions/ffs.aa"));
         if (!is2d00 && !hasFfs) {
+            // Our 18d1 vendor id may still be on usb-moded's gadget (it only
+            // rewrites idProduct); put the phone's own back.
+            const QString fixed = restoreNativeVendor(g);
+            if (!fixed.isEmpty())
+                emit log(fixed);
             // A previous helper may have died mid-switch after stopping
             // usb-moded but before building anything: the phone then has no
             // normal USB (charging/MTP mode) until usb-moded runs again.
@@ -734,6 +825,9 @@ UsbGadget::UsbGadget(QObject *parent)
             ::unlink((g + QStringLiteral("/configs/") + c + QStringLiteral("/ffs.aa")).toLocal8Bit().constData());
         ::umount2(QStringLiteral("/dev/usb-ffs/aa").toLocal8Bit().constData(), MNT_DETACH);
         ::rmdir((g + QStringLiteral("/functions/ffs.aa")).toLocal8Bit().constData());
+        const QString fixed = restoreNativeVendor(g);
+        if (!fixed.isEmpty())
+            emit log(fixed);
         runCmd(QStringLiteral("systemctl"), { QStringLiteral("restart"), QStringLiteral("usb-moded") });
     });
 }
