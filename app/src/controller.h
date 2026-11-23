@@ -15,6 +15,7 @@ class AppRegistry;
 class CarScreen;
 class MprisController;
 class PhoneManager;
+class LedController;
 class QQmlEngine;
 class QQmlNetworkAccessManagerFactory;
 class Transport;
@@ -129,6 +130,7 @@ private:
     AppRegistry *m_apps;
     MprisController *m_mpris;
     PhoneManager *m_phone;
+    LedController *m_leds;
     int m_mode = Wireless;
     bool m_running = false;
     QString m_state;

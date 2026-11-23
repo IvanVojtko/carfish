@@ -72,6 +72,7 @@ bool CarScreen::start(const QUrl &qml, const QSize &size, int fps, QString *erro
     m_engine->rootContext()->setContextProperty(QStringLiteral("appList"), m_apps);
     m_engine->rootContext()->setContextProperty(QStringLiteral("navBridge"), m_navBridge);
     m_engine->rootContext()->setContextProperty(QStringLiteral("phone"), m_phone);
+    m_engine->rootContext()->setContextProperty(QStringLiteral("leds"), m_leds);
     m_component = new QQmlComponent(m_engine, qml, QQmlComponent::PreferSynchronous);
     if (m_component->isError()) {
         *error = m_component->errorString();

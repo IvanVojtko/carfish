@@ -108,6 +108,7 @@ public:
     void setMediaSource(QObject *media) { m_media = media; }
     void setAppRegistry(QObject *apps) { m_apps = apps; }
     void setPhone(QObject *phone) { m_phone = phone; }
+    void setLeds(QObject *leds) { m_leds = leds; } // LedController: car QML "leds"
     QObject *navBridge() const; // NavBridge*; defined in the .cpp (complete type)
 
 signals:
@@ -150,5 +151,6 @@ private:
     QObject *m_media = nullptr;
     QObject *m_apps = nullptr;
     QObject *m_phone = nullptr;
+    QObject *m_leds = nullptr;
     class NavBridge *m_navBridge = nullptr;
 };

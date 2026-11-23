@@ -113,6 +113,7 @@ add_executable(carfish
     src/media/micreceiver.cpp
     src/media/carscreen.cpp
     src/media/navbridge.cpp
+    src/led/ledcontroller.cpp
     src/util/credentials.cpp
     ${PROTO_SRCS}
 )

@@ -1262,11 +1262,18 @@ Rectangle {
             anchors.topMargin: settingsTitle.y + settingsTitle.height + root.pad
             anchors.leftMargin: root.pad * 1.3; anchors.rightMargin: root.pad * 1.3
             anchors.bottomMargin: root.pad
-            contentHeight: settingsCol.height
+            contentHeight: settingsFlow.height
             clip: true
+            // Wide screens: general settings left, Ambient lights right, so
+            // nothing needs scrolling; narrow ones stack them.
+            Flow {
+                id: settingsFlow
+                width: parent.width
+                spacing: root.pad * 2
+                readonly property bool twoCols: ledSection.have && settingsView.width > settingsView.height * 1.3
             Column {
                 id: settingsCol
-                width: parent.width
+                width: settingsFlow.twoCols ? (settingsFlow.width - settingsFlow.spacing) / 2 : settingsFlow.width
                 spacing: root.pad * 1.6
                 Repeater {
                     model: [
@@ -1331,6 +1338,146 @@ Rectangle {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+                // Ambient lights: only when a Bluetooth LED kit (LEDCAR-/LEDBLE-)
+                // was found nearby during this session. Static colour,
+                // brightness and on/off; the kit reports nothing back, so the
+                // controls show the last values set from here.
+                Column {
+                    id: ledSection
+                    readonly property bool have: typeof leds !== "undefined" && !!leds && leds.found
+                    readonly property bool live: have && leds.state === "connected"
+                    visible: have
+                    width: settingsCol.width
+                    spacing: root.pad * 0.6
+                    readonly property real barW: Math.min(width, root.unit * 1.1)
+                    readonly property real barH: Math.round(root.unit * 0.075)
+
+                    Text {
+                        color: root.fg; font.bold: true
+                        font.pixelSize: root.unit * 0.04
+                        text: "Ambient lights"
+                    }
+                    Text {
+                        width: parent.width
+                        color: root.dim; font.pixelSize: root.unit * 0.03
+                        elide: Text.ElideRight
+                        text: !ledSection.have ? "" : leds.name + " · "
+                              + (leds.state === "connected" ? "connected"
+                                 : leds.state === "connecting" ? "connecting…" : "not connected")
+                    }
+                    // Off / On
+                    Rectangle {
+                        width: ledSection.barW * 0.5
+                        height: Math.round(root.unit * 0.1)
+                        radius: height / 2
+                        color: root.surface2
+                        Row {
+                            id: ledPower
+                            anchors.fill: parent
+                            anchors.margins: Math.round(parent.height * 0.08)
+                            Repeater {
+                                model: [ { v: false, label: "Off" }, { v: true, label: "On" } ]
+                                Rectangle {
+                                    readonly property bool sel: ledSection.have && leds.on === modelData.v
+                                    width: ledPower.width / 2; height: ledPower.height
+                                    radius: height / 2
+                                    color: sel ? root.accent : "transparent"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        color: parent.sel ? "white" : root.fg
+                                        font.bold: parent.sel
+                                        font.pixelSize: root.unit * 0.034
+                                        text: modelData.label
+                                    }
+                                    MouseArea { anchors.fill: parent; onClicked: leds.setOn(modelData.v) }
+                                }
+                            }
+                        }
+                    }
+                    // preset colours
+                    Flow {
+                        width: ledSection.barW
+                        spacing: root.pad * 0.8
+                        Repeater {
+                            model: [ "#ff0000", "#ff7a00", "#ffd400", "#00e04b", "#00d5ff",
+                                     "#0050ff", "#8a2be2", "#ff2d95", "#ffffff" ]
+                            Rectangle {
+                                readonly property bool sel: ledSection.have
+                                                            && String(leds.color).toLowerCase() === modelData
+                                width: Math.round(root.unit * 0.085); height: width; radius: width / 2
+                                color: modelData
+                                border.width: sel ? Math.round(width * 0.1) : 1
+                                border.color: sel ? root.fg : root.dim
+                                MouseArea { anchors.fill: parent; onClicked: leds.setColor(modelData) }
+                            }
+                        }
+                    }
+                    // any hue: drag along the rainbow
+                    Item {
+                        width: ledSection.barW; height: ledSection.barH
+                        Canvas {
+                            anchors.fill: parent
+                            renderStrategy: Canvas.Immediate; renderTarget: Canvas.Image; antialiasing: true
+                            onWidthChanged: requestPaint()
+                            onPaint: {
+                                var ctx = getContext("2d"); ctx.reset()
+                                var g = ctx.createLinearGradient(0, 0, width, 0)
+                                for (var i = 0; i <= 6; i++)
+                                    g.addColorStop(i / 6, Qt.hsla(i / 6, 1, 0.5, 1))
+                                ctx.fillStyle = g
+                                var r = height / 2
+                                ctx.beginPath()
+                                ctx.arc(r, r, r, Math.PI / 2, Math.PI * 1.5)
+                                ctx.lineTo(width - r, 0)
+                                ctx.arc(width - r, r, r, Math.PI * 1.5, Math.PI / 2)
+                                ctx.closePath()
+                                ctx.fill()
+                            }
+                        }
+                        Rectangle { // marker at the current hue (hidden for white)
+                            visible: ledSection.have && leds.color.hslSaturation > 0.2
+                            width: parent.height * 1.1; height: width; radius: width / 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: Math.max(0, Math.min(parent.width - width,
+                                   (ledSection.have ? leds.color.hslHue : 0) * parent.width - width / 2))
+                            color: ledSection.have ? leds.color : "white"
+                            border.width: Math.max(2, Math.round(width * 0.12)); border.color: "white"
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            function pickAt(mx) {
+                                var h = Math.max(0, Math.min(0.999, mx / width))
+                                leds.setColor(Qt.hsla(h, 1, 0.5, 1))
+                            }
+                            onPressed: pickAt(mouse.x)
+                            onPositionChanged: pickAt(mouse.x)
+                        }
+                    }
+                    // brightness
+                    Text {
+                        color: root.dim; font.pixelSize: root.unit * 0.03
+                        text: "Brightness " + (ledSection.have ? leds.brightness : 0) + "%"
+                    }
+                    Rectangle {
+                        width: ledSection.barW; height: ledSection.barH
+                        radius: height / 2
+                        color: root.surface2
+                        Rectangle {
+                            width: Math.max(parent.height, parent.width * (ledSection.have ? leds.brightness : 0) / 100)
+                            height: parent.height; radius: height / 2
+                            color: root.accent
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            function setAt(mx) {
+                                leds.setBrightness(Math.round(Math.max(1, Math.min(100, mx / width * 100))))
+                            }
+                            onPressed: setAt(mouse.x)
+                            onPositionChanged: setAt(mouse.x)
                         }
                     }
                 }

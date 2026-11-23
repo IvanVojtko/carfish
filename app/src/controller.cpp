@@ -4,6 +4,7 @@
 #include "apps/appregistry.h"
 #include "apps/mpriscontroller.h"
 #include "apps/phonemanager.h"
+#include "led/ledcontroller.h"
 #include "media/carscreen.h"
 #include "transport/tcptransport.h"
 #include "transport/usbffstransport.h"
@@ -48,11 +49,13 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
     , m_apps(new AppRegistry(this))
     , m_mpris(new MprisController(this))
     , m_phone(new PhoneManager(this))
+    , m_leds(new LedController(this))
     , m_screen(new CarScreen(engine, this))
 {
     m_screen->setMediaSource(m_mpris);
     m_screen->setAppRegistry(m_apps);
     m_screen->setPhone(m_phone);
+    m_screen->setLeds(m_leds); // Bluetooth ambient lights, on the car's Settings screen
     // Stamp an identifying User-Agent on every QML network request so OSM serves
     // real tiles instead of its "access blocked" placeholder. Must be set before
     // any networked QML (Image tiles) is instantiated.
@@ -63,6 +66,7 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
     // Let the car QML drop diagnostics into the durable log (carScreen.log(...)).
     connect(m_screen, &CarScreen::logMessage, this, &Controller::appendLog);
     connect(m_phone, &PhoneManager::log, this, &Controller::appendLog);
+    connect(m_leds, &LedController::log, this, &Controller::appendLog);
     // Push the saved TomTom traffic key + toggle and the map orientation to the car
     // map, and persist them when they are flipped from the on-map buttons.
     m_screen->setTrafficKey(trafficKey());
@@ -564,6 +568,12 @@ void Controller::startSession(Transport *transport)
 
     appendLog(tr("Starting session over %1").arg(transport->describe()));
     m_session->start();
+    // Look for a Bluetooth ambient-light kit once the projection has settled
+    // (an LE scan during the wireless AA bring-up would compete for the radio).
+    QTimer::singleShot(8000, this, [this] {
+        if (m_session)
+            m_leds->start();
+    });
 }
 
 void Controller::stop()
@@ -622,6 +632,7 @@ void Controller::endSession(const QString &reason)
         m_wireless = nullptr;
     }
     m_usbSwitchTimer.stop();
+    m_leds->stop();
     if (m_usbHelper) {
         m_usbHelper->stop(); // restores usb-moded / the normal USB gadget
         m_usbHelper->deleteLater();

@@ -12,6 +12,7 @@
 #include <QObject>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QColor>
 #include <QQuickItem>
 #include <QQuickView>
 #include <QTimer>
@@ -200,6 +201,36 @@ private:
     QVariantList m_queue;
 };
 
+// Mock ambient-light kit (LedController on the device). PREVIEW_LED=1 makes
+// it "found" so the car Settings screen shows the Ambient lights section.
+class PreviewLeds : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(bool found READ found NOTIFY changed)
+    Q_PROPERTY(QString name READ name NOTIFY changed)
+    Q_PROPERTY(QString state READ state NOTIFY changed)
+    Q_PROPERTY(bool on READ on NOTIFY changed)
+    Q_PROPERTY(QColor color READ color NOTIFY changed)
+    Q_PROPERTY(int brightness READ brightness NOTIFY changed)
+public:
+    bool m_found = false;
+    bool found() const { return m_found; }
+    QString name() const { return QStringLiteral("LEDCAR-01-3F2A"); }
+    QString state() const { return QStringLiteral("connected"); }
+    bool on() const { return m_on; }
+    QColor color() const { return m_color; }
+    int brightness() const { return m_brightness; }
+    Q_INVOKABLE void setOn(bool on) { m_on = on; emit changed(); }
+    Q_INVOKABLE void setColor(const QColor &c) { m_color = c; m_on = true; emit changed(); }
+    Q_INVOKABLE void setBrightness(int b) { m_brightness = qBound(1, b, 100); emit changed(); }
+signals:
+    void changed();
+private:
+    bool m_on = true;
+    QColor m_color = QColor(QStringLiteral("#8a2be2"));
+    int m_brightness = 70;
+};
+
 #include "preview.moc"
 
 int main(int argc, char **argv)
@@ -223,6 +254,9 @@ int main(int argc, char **argv)
     view.rootContext()->setContextProperty(QStringLiteral("carScreen"), &screen);
     view.rootContext()->setContextProperty(QStringLiteral("media"), &mediaMock);
     view.rootContext()->setContextProperty(QStringLiteral("phone"), &phone);
+    PreviewLeds leds;
+    leds.m_found = !qgetenv("PREVIEW_LED").isEmpty();
+    view.rootContext()->setContextProperty(QStringLiteral("leds"), &leds);
     // PREVIEW_QUEUE=1 opens the play-queue (track list) overlay for a still.
     view.rootContext()->setContextProperty(QStringLiteral("previewQueue"),
                                            QString::fromLocal8Bit(qgetenv("PREVIEW_QUEUE")));
