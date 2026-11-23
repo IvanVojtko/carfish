@@ -20,8 +20,12 @@
 #include <QDBusObjectPath>
 #include <QBuffer>
 #include <QDateTime>
+#include <QCoreApplication>
 #include <QDir>
+#include <QProcess>
 #include <QFile>
+#include <QFileInfo>
+#include <QRegularExpression>
 #include <QImage>
 #include <QLoggingCategory>
 #include <QNetworkAccessManager>
@@ -37,6 +41,19 @@ Q_LOGGING_CATEGORY(lcCtl, "aap.controller")
 // Durable log on the device so diagnostics survive closing the app; read it
 // with:  ssh defaultuser@<ip> 'cat ~/carfish.log'
 static const QString kLogFile = QDir::homePath() + QStringLiteral("/carfish.log");
+// Rotated at this size to carfish.log.1, so at most ~2 x 1 MB is kept.
+static constexpr qint64 kMaxLogBytes = 1024 * 1024;
+
+// The log is often shared to report a problem, so GPS positions are blanked
+// ("48.1374,11.5755" -> "<location>"); the setting logLocation=true keeps them.
+static QString redactLocation(const QString &line)
+{
+    static const QRegularExpression coord(QStringLiteral(
+        "(?<![\\d.])-?\\d{1,3}\\.\\d{3,}\\s*,\\s*-?\\d{1,3}\\.\\d{3,}(?![\\d.])"));
+    QString out = line;
+    out.replace(coord, QStringLiteral("<location>"));
+    return out;
+}
 
 static constexpr int kMaxLogLines = 200;
 // Android's "head unit server" developer option listens on the same port.
@@ -96,6 +113,18 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
         m_settings.setValue(QStringLiteral("recentPlaces"), m_screen->recentPlaces());
         m_settings.sync();
     });
+    // The map's last position (stored on this phone only; see CarScreen::lastFix).
+    {
+        const QVariant lat = m_settings.value(QStringLiteral("lastFixLat"));
+        const QVariant lon = m_settings.value(QStringLiteral("lastFixLon"));
+        if (lat.isValid() && lon.isValid())
+            m_screen->setLastFix(QPointF(lat.toDouble(), lon.toDouble()));
+    }
+    connect(m_screen, &CarScreen::lastFixChanged, this, [this] {
+        const QPointF p = m_screen->lastFix();
+        m_settings.setValue(QStringLiteral("lastFixLat"), p.x());
+        m_settings.setValue(QStringLiteral("lastFixLon"), p.y());
+    });
     connect(m_screen, &CarScreen::mapHeadingUpChanged, this, [this] {
         if (m_screen->mapHeadingUp() != mapHeadingUp())
             setMapHeadingUp(m_screen->mapHeadingUp());
@@ -103,6 +132,8 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
     // Carry settings over from before the rename so an upgrade keeps the user's
     // cert/key paths and chosen media app (the Spotify auto-launch).
     migrateLegacySettings();
+    m_logLocation = m_settings.value(QStringLiteral("logLocation"), false).toBool();
+    scrubOldLog();
     m_mode = m_settings.value(QStringLiteral("mode"), int(Wireless)).toInt();
     m_state = tr("Idle");
     refreshCertStatus();
@@ -112,6 +143,82 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
     // machinery is kept so it can be re-enabled later.
     m_autoDetect.setInterval(3000);
     connect(&m_autoDetect, &QTimer::timeout, this, &Controller::checkAutoStart);
+
+    // USB auto-start: the helper reports a plugged-in cable on the system bus
+    // (and launches us through a user unit when we aren't running).
+    QDBusConnection::systemBus().connect(QStringLiteral("org.carfish.Helper"), QStringLiteral("/org/carfish/Usb"),
+                                         QStringLiteral("org.carfish.Usb1"), QStringLiteral("CablePlugged"),
+                                         this, SLOT(onCablePlugged()));
+    m_usbAutoTimer.setSingleShot(true);
+    m_usbAutoTimer.setInterval(15000);
+    connect(&m_usbAutoTimer, &QTimer::timeout, this, [this] {
+        if (!m_usbAuto)
+            return;
+        m_usbAuto = false;
+        appendLog(tr("USB: no car started Android Auto within 15 s (a computer or charger?); "
+                     "normal USB is back"));
+        stop();
+        m_mode = m_usbAutoPrevMode;
+        m_settings.setValue(QStringLiteral("mode"), m_mode);
+        emit modeChanged();
+        if (m_usbAutoLaunched)
+            QTimer::singleShot(1500, qApp, &QCoreApplication::quit);
+    });
+    syncUsbAutoStartUnit();
+}
+
+bool Controller::usbAutoStart() const
+{
+    return m_settings.value(QStringLiteral("usbAutoStart"), false).toBool();
+}
+
+void Controller::setUsbAutoStart(bool on)
+{
+    if (on == usbAutoStart())
+        return;
+    m_settings.setValue(QStringLiteral("usbAutoStart"), on);
+    m_settings.sync();
+    syncUsbAutoStartUnit();
+    emit usbAutoStartChanged();
+}
+
+// The user unit that launches Carfish on a plug when it isn't running. Run on
+// every start too, so the unit follows the setting after reinstalls.
+void Controller::syncUsbAutoStartUnit()
+{
+#ifndef CARFISH_DESKTOP
+    // daemon-reload first: after an install the user manager hasn't read the unit yet.
+    QProcess::startDetached(QStringLiteral("sh"),
+                            { QStringLiteral("-c"),
+                              QStringLiteral("systemctl --user daemon-reload; systemctl --user %1 --now "
+                                             "carfish-usb-autostart.path")
+                                  .arg(usbAutoStart() ? QStringLiteral("enable") : QStringLiteral("disable")) });
+#endif
+}
+
+void Controller::onCablePlugged()
+{
+    if (usbAutoStart())
+        startUsbAuto(false);
+}
+
+void Controller::startUsbAuto(bool launched)
+{
+    if (!usbAutoStart()) {
+        if (launched)
+            QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+        return;
+    }
+    if (m_running)
+        return; // a session (e.g. wireless) is already up
+    appendLog(tr("USB cable plugged in: looking for a car (auto-start)"));
+    m_usbAutoPrevMode = m_mode;
+    m_usbAutoLaunched = launched;
+    start(Usb);
+    if (!m_running)
+        return;
+    m_usbAuto = true;
+    m_usbAutoTimer.start();
 }
 
 Controller::~Controller()
@@ -469,6 +576,8 @@ void Controller::start(int mode)
             setState(tr("USB switch stuck: replug the cable"));
         });
         connect(m_usbHelper, &UsbHelperClient::startRequested, this, [this](const QString &model) {
+            m_usbAuto = false; // a car answered: no auto-start timeout any more
+            m_usbAutoTimer.stop();
             appendLog(tr("USB: car started Android Auto (%1)").arg(model));
             setState(tr("Switching USB to accessory mode"));
             m_usbSwitchTimer.start();
@@ -617,6 +726,8 @@ void Controller::savePreviewFrame(const QImage &rgba)
 
 void Controller::endSession(const QString &reason)
 {
+    m_usbAutoTimer.stop();
+    m_usbAuto = false;
     if (m_session) {
         m_session->disconnect(this);
         m_session->shutdown();
@@ -653,9 +764,32 @@ void Controller::setState(const QString &state)
     emit stateChanged();
 }
 
-void Controller::appendLog(const QString &line)
+// Logs written before positions were blanked: blank them once, in place.
+void Controller::scrubOldLog()
 {
+    if (m_logLocation || m_settings.value(QStringLiteral("logScrubbed"), false).toBool())
+        return;
+    m_settings.setValue(QStringLiteral("logScrubbed"), true);
+    for (const QString &path : { kLogFile, kLogFile + QStringLiteral(".1") }) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+            continue;
+        const QString text = QString::fromUtf8(f.readAll());
+        f.close();
+        const QString clean = redactLocation(text);
+        if (clean != text && f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+            f.write(clean.toUtf8());
+    }
+}
+
+void Controller::appendLog(const QString &rawLine)
+{
+    const QString line = m_logLocation ? rawLine : redactLocation(rawLine);
     qCInfo(lcCtl).noquote() << line; // journal on device
+    if (QFileInfo(kLogFile).size() > kMaxLogBytes) {
+        QFile::remove(kLogFile + QStringLiteral(".1"));
+        QFile::rename(kLogFile, kLogFile + QStringLiteral(".1"));
+    }
     QFile f(kLogFile);
     if (f.open(QIODevice::Append | QIODevice::Text))
         QTextStream(&f) << QDateTime::currentDateTime().toString(Qt::ISODate) << QLatin1Char(' ') << line << QLatin1Char('\n');

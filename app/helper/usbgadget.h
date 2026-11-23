@@ -2,6 +2,8 @@
 
 #include <QByteArray>
 #include <QDBusAbstractAdaptor>
+#include <QElapsedTimer>
+#include <QTimer>
 #include <QObject>
 #include <QPointer>
 #include <QList>
@@ -112,8 +114,27 @@ signals:
     void startRequested(const QString &model, const QString &serial);
     void ready(const QString &ffsDir);
     void failed(const QString &reason);
+    // A USB host (a car or a computer, not a plain charger) was just plugged
+    // in while no wired session was running.
+    void cablePlugged();
 
 private:
+    // Cable watch: kernel uevents (power supply / USB) wake a short poll of the
+    // UDC state; "not attached" -> "configured" outside our own gadget work is a
+    // plug. Also touches kPlugTrigger when the app isn't running, which the
+    // user unit carfish-usb-autostart.path watches to launch it.
+    void setupCableWatch();
+    void onUevent();
+    void checkCable();
+    bool busy() const;
+    static bool appRunning();
+    static void touchPlugTrigger();
+    int m_uevent = -1;
+    QTimer *m_cablePoll = nullptr;
+    int m_pollTicks = 0;
+    QString m_udcState;
+    QElapsedTimer m_lastGadgetWork; // our own unbind/rebind look like replugs
+
     UsbGadgetWorker *m_worker = nullptr;
     // Workers that did not stop in time (blocked in the kernel); they delete
     // themselves when they finish. New attempts refuse to start meanwhile.
@@ -133,6 +154,7 @@ public slots:
     void Stop();
 
 signals:
+    void CablePlugged();
     void Ready(const QString &ffsDir);
     void StartRequested(const QString &model, const QString &serial);
     void Failed(const QString &reason);

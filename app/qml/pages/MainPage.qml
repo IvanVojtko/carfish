@@ -42,6 +42,14 @@ Page {
                 }
             }
 
+            TextSwitch {
+                text: qsTr("Start when a USB cable is plugged in")
+                description: qsTr("Opens Carfish and starts Android Auto over USB. If no car answers "
+                                  + "within 15 s (a computer or charger), normal USB comes back.")
+                checked: controller.usbAutoStart
+                onClicked: controller.usbAutoStart = checked
+            }
+
             TextField {
                 width: parent.width
                 enabled: !controller.running

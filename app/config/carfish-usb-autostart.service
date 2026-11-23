@@ -1,0 +1,6 @@
+[Unit]
+Description=Open Carfish for a plugged-in USB cable
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/invoker --type=silica-qt5 --single-instance --no-wait /usr/bin/carfish --usb-autostart

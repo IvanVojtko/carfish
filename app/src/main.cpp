@@ -6,6 +6,7 @@
 #include <QQmlEngine>
 #include <QQuickView>
 #include <QScopedPointer>
+#include <QTimer>
 
 #ifndef CARFISH_DESKTOP
 #include <sailfishapp.h>
@@ -94,6 +95,9 @@ int main(int argc, char *argv[])
     view->rootContext()->setContextProperty(QStringLiteral("controller"), &controller);
     view->setSource(SailfishApp::pathToMainQml());
     view->show();
+    // Launched by the carfish-usb-autostart user unit: a USB cable was plugged in.
+    if (app->arguments().contains(QStringLiteral("--usb-autostart")))
+        QTimer::singleShot(0, &controller, [&controller] { controller.startUsbAuto(true); });
     return app->exec();
 #endif
 }

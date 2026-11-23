@@ -14,7 +14,19 @@ Item {
     property bool _tileErrLogged: false
     property bool _trafficErrLogged: false
     property bool _fixLogged: false
-    Component.onCompleted: mlog("TileMap loaded; host=" + tileHost + " tiles=" + _tiles.length)
+    Component.onCompleted: {
+        // Open where the car was last time (its tiles are in the disk cache)
+        // at driving zoom, instead of a wide Helsinki view until the GPS fix.
+        var last = (typeof carScreen !== "undefined" && carScreen && carScreen.lastFix) ? carScreen.lastFix : null
+        if (last && (last.x !== 0 || last.y !== 0)) {
+            centerLat = last.x; centerLon = last.y
+            _rLat = last.x; _rLon = last.y
+            zoom = drivingZoom
+        }
+        mlog("TileMap loaded; host=" + tileHost + " tiles=" + _tiles.length
+             + (last && (last.x !== 0 || last.y !== 0) ? " (from last position)" : ""))
+    }
+    property real _fixSavedAt: 0   // when lastFix was last stored (ms)
 
     // Centre of the view. Defaults to Helsinki until GPS gets a fix. This is the
     // DISPLAY centre: it animates smoothly between the 1 Hz GPS fixes so the map
@@ -972,6 +984,12 @@ Item {
         onActiveChanged: tm.mlog("GPS active=" + active + " valid=" + valid)
         onPositionChanged: {
             if (position.latitudeValid && position.longitudeValid) {
+                // Remember the position for the next start, at most once a minute.
+                if (typeof carScreen !== "undefined" && carScreen && carScreen.lastFix !== undefined
+                        && Date.now() - tm._fixSavedAt > 60000) {
+                    tm._fixSavedAt = Date.now()
+                    carScreen.lastFix = Qt.point(position.coordinate.latitude, position.coordinate.longitude)
+                }
                 if (!tm._fixLogged) {
                     tm._fixLogged = true
                     tm.mlog("GPS fix " + position.coordinate.latitude.toFixed(4) + "," + position.coordinate.longitude.toFixed(4))

@@ -85,6 +85,13 @@ install -D -m 0644 %{buildroot}%{_datadir}/%{name}/config/org.carfish.Helper.ser
 install -D -m 0644 %{buildroot}%{_datadir}/%{name}/config/carfish-helper.service \
    %{buildroot}%{_unitdir}/carfish-helper.service
 
+# User units: open Carfish when a USB cable is plugged in (enabled from the
+# app's "Start when a USB cable is plugged in" setting).
+install -D -m 0644 %{buildroot}%{_datadir}/%{name}/config/carfish-usb-autostart.path \
+   %{buildroot}/usr/lib/systemd/user/carfish-usb-autostart.path
+install -D -m 0644 %{buildroot}%{_datadir}/%{name}/config/carfish-usb-autostart.service \
+   %{buildroot}/usr/lib/systemd/user/carfish-usb-autostart.service
+
 %post
 # Load the new udev rule and apply it to an already-present accessory node so
 # wired Android Auto works without replugging.
@@ -122,5 +129,7 @@ fi
 %{_datadir}/dbus-1/system.d/carfish-helper.conf
 %{_datadir}/dbus-1/system-services/org.carfish.Helper.service
 %{_unitdir}/carfish-helper.service
+/usr/lib/systemd/user/carfish-usb-autostart.path
+/usr/lib/systemd/user/carfish-usb-autostart.service
 /lib/udev/rules.d/999-carfish-aoa.rules
 %{_datadir}/dbus-1/system.d/carfish.conf

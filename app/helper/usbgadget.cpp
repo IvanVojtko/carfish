@@ -1,5 +1,6 @@
 #include "usbgadget.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -9,6 +10,7 @@
 #include <QRegExp>
 #include <QTimer>
 #include <QProcess>
+#include <QSocketNotifier>
 
 #include <QDebug>
 #include <QPointer>
@@ -27,6 +29,8 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <linux/netlink.h>
+#include <sys/socket.h>
 
 // ---- f_accessory ioctls (linux drivers/usb/gadget/function/f_accessory.h) ----
 // _IOW('M', n, char[256]) for the strings, _IO('M', 7) for the start flag.
@@ -873,6 +877,7 @@ UsbGadget::UsbGadget(QObject *parent)
     // from a stop/teardown or a stuck attempt were lost from ~/carfish.log.
     connect(this, &UsbGadget::log, this, [](const QString &l) { qInfo().noquote() << l; });
     connect(this, &UsbGadget::failed, this, [](const QString &r) { qWarning().noquote() << "usb: failed:" << r; });
+    setupCableWatch();
     // On helper startup, recover daily USB if a previous session was interrupted
     // (e.g. the helper was restarted by a package upgrade) and left the gadget as
     // our 18d1:2d00 accessory. Done after the event loop starts so it never
@@ -920,6 +925,8 @@ UsbGadget::UsbGadget(QObject *parent)
 UsbGadget::~UsbGadget()
 {
     stop();
+    if (m_uevent >= 0)
+        ::close(m_uevent);
 }
 
 void UsbGadget::start()
@@ -942,7 +949,9 @@ void UsbGadget::start()
         m_worker->deleteLater();
         m_worker = nullptr;
     }
+    m_lastGadgetWork.restart();
     m_worker = new UsbGadgetWorker(this);
+    connect(m_worker, &QThread::finished, this, [this] { m_lastGadgetWork.restart(); });
     connect(m_worker, &UsbGadgetWorker::log, this, &UsbGadget::log);
     connect(m_worker, &UsbGadgetWorker::startRequested, this, &UsbGadget::startRequested);
     connect(m_worker, &UsbGadgetWorker::ready, this, &UsbGadget::ready);
@@ -981,6 +990,134 @@ void UsbGadget::stop()
 // ---------------------------------------------------------------------------
 // UsbAdaptor (D-Bus)
 // ---------------------------------------------------------------------------
+// ------------------------------------------------------------ cable watch
+
+static const char *kPlugTrigger = "/run/carfish/usb-plugged";
+
+void UsbGadget::setupCableWatch()
+{
+    const QStringList udcs = QDir(QString::fromLatin1(kUdcClass)).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    if (udcs.isEmpty())
+        return;
+    m_udcState = readTrim(QStringLiteral("%1/%2/state").arg(QLatin1String(kUdcClass), udcs.first()));
+    m_uevent = ::socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, NETLINK_KOBJECT_UEVENT);
+    if (m_uevent < 0) {
+        qWarning() << "usb: cable watch: no uevent socket:" << strerror(errno);
+        return;
+    }
+    sockaddr_nl addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.nl_family = AF_NETLINK;
+    addr.nl_groups = 1; // kernel uevents
+    if (::bind(m_uevent, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+        qWarning() << "usb: cable watch: cannot bind uevent socket:" << strerror(errno);
+        ::close(m_uevent);
+        m_uevent = -1;
+        return;
+    }
+    auto *n = new QSocketNotifier(m_uevent, QSocketNotifier::Read, this);
+    connect(n, &QSocketNotifier::activated, this, [this] { onUevent(); });
+    m_cablePoll = new QTimer(this);
+    m_cablePoll->setInterval(500);
+    connect(m_cablePoll, &QTimer::timeout, this, [this] {
+        checkCable();
+        if (--m_pollTicks <= 0)
+            m_cablePoll->stop();
+    });
+    qInfo().noquote() << "usb: watching for a USB cable (bus state" << m_udcState << ")";
+}
+
+void UsbGadget::onUevent()
+{
+    char buf[4096];
+    bool relevant = false;
+    for (;;) {
+        const ssize_t n = ::recv(m_uevent, buf, sizeof(buf) - 1, 0);
+        if (n <= 0)
+            break;
+        buf[n] = 0;
+        // NUL-separated "action@devpath", then KEY=VALUE lines.
+        const QByteArray msg(buf, int(n));
+        if (msg.startsWith("libudev"))
+            continue;
+        const bool battery = msg.contains("POWER_SUPPLY_NAME=battery");
+        if ((!battery && msg.contains("SUBSYSTEM=power_supply")) || msg.contains("android_usb")
+                || msg.contains("SUBSYSTEM=udc") || msg.contains("SUBSYSTEM=extcon")
+                || msg.contains("SUBSYSTEM=typec") || msg.contains("USB_STATE="))
+            relevant = true;
+    }
+    if (!relevant || !m_cablePoll)
+        return;
+    // The bus reaches "configured" a few seconds after power appears.
+    m_pollTicks = 16; // 8 s
+    checkCable();
+    if (!m_cablePoll->isActive())
+        m_cablePoll->start();
+}
+
+bool UsbGadget::busy() const
+{
+    if (m_worker && m_worker->isRunning())
+        return true;
+    for (const QPointer<UsbGadgetWorker> &w : m_abandoned)
+        if (w && w->isRunning())
+            return true;
+    return false;
+}
+
+void UsbGadget::checkCable()
+{
+    const QStringList udcs = QDir(QString::fromLatin1(kUdcClass)).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    if (udcs.isEmpty())
+        return;
+    const QString state = readTrim(QStringLiteral("%1/%2/state").arg(QLatin1String(kUdcClass), udcs.first()));
+    if (state == m_udcState)
+        return;
+    const QString old = m_udcState;
+    m_udcState = state;
+    if (old != QLatin1String("not attached") || state != QLatin1String("configured"))
+        return;
+    // Our own sessions unbind/rebind the controller, which looks just like a plug.
+    if (busy() || (m_lastGadgetWork.isValid() && m_lastGadgetWork.elapsed() < 10000))
+        return;
+    const bool app = appRunning();
+    emit log(QStringLiteral("usb: cable plugged into a USB host%1")
+                 .arg(app ? QString() : QStringLiteral("; asking the session to open Carfish")));
+    emit cablePlugged();
+    if (!app)
+        touchPlugTrigger();
+}
+
+// Is the Carfish app (not this helper) running? Launched through the booster,
+// its argv[0] is still the binary path.
+bool UsbGadget::appRunning()
+{
+    const QStringList pids = QDir(QStringLiteral("/proc")).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &pid : pids) {
+        if (pid.isEmpty() || !pid.at(0).isDigit())
+            continue;
+        QFile f(QStringLiteral("/proc/%1/cmdline").arg(pid));
+        if (!f.open(QIODevice::ReadOnly))
+            continue;
+        const QByteArray argv0 = f.read(256).split('\0').value(0);
+        const QByteArray base = argv0.mid(argv0.lastIndexOf('/') + 1);
+        if (base == "carfish")
+            return true;
+    }
+    return false;
+}
+
+void UsbGadget::touchPlugTrigger()
+{
+    ::mkdir("/run/carfish", 0755);
+    QFile f(QString::fromLatin1(kPlugTrigger));
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(QByteArray::number(QDateTime::currentMSecsSinceEpoch()) + '\n');
+        f.close();
+        ::chmod(kPlugTrigger, 0644);
+    }
+}
+
 UsbAdaptor::UsbAdaptor(UsbGadget *usb)
     : QDBusAbstractAdaptor(usb)
     , m_usb(usb)
@@ -989,6 +1126,7 @@ UsbAdaptor::UsbAdaptor(UsbGadget *usb)
     connect(m_usb, &UsbGadget::startRequested, this, &UsbAdaptor::StartRequested);
     connect(m_usb, &UsbGadget::failed, this, &UsbAdaptor::Failed);
     connect(m_usb, &UsbGadget::log, this, &UsbAdaptor::Log);
+    connect(m_usb, &UsbGadget::cablePlugged, this, &UsbAdaptor::CablePlugged);
 }
 
 void UsbAdaptor::Start()

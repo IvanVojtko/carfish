@@ -243,6 +243,14 @@ void CarScreen::setMapHeadingUp(bool on)
     emit mapHeadingUpChanged();
 }
 
+void CarScreen::setLastFix(const QPointF &fix)
+{
+    if (m_lastFix == fix)
+        return;
+    m_lastFix = fix;
+    emit lastFixChanged();
+}
+
 void CarScreen::setEnergy(int levelPct, int rangeKm, bool electric, bool low)
 {
     if (m_evLevel == levelPct && m_evRange == rangeKm

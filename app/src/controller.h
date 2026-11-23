@@ -41,6 +41,8 @@ class Controller : public QObject
     Q_PROPERTY(QString navApp READ navApp WRITE setNavApp NOTIFY navAppChanged)
     Q_PROPERTY(QString mediaApp READ mediaApp WRITE setMediaApp NOTIFY mediaAppChanged)
     Q_PROPERTY(bool autoStart READ autoStart WRITE setAutoStart NOTIFY autoStartChanged)
+    // Open Carfish and start wired Android Auto when a USB cable is plugged in.
+    Q_PROPERTY(bool usbAutoStart READ usbAutoStart WRITE setUsbAutoStart NOTIFY usbAutoStartChanged)
     Q_PROPERTY(QString trafficKey READ trafficKey WRITE setTrafficKey NOTIFY trafficKeyChanged)
     Q_PROPERTY(bool trafficEnabled READ trafficEnabled WRITE setTrafficEnabled NOTIFY trafficEnabledChanged)
     Q_PROPERTY(double batteryCapacityKwh READ batteryCapacityKwh WRITE setBatteryCapacityKwh NOTIFY batteryCapacityKwhChanged)
@@ -68,6 +70,13 @@ public:
     void setMediaApp(const QString &id);
     bool autoStart() const;
     void setAutoStart(bool on);
+    bool usbAutoStart() const;
+    void setUsbAutoStart(bool on);
+    // A USB cable was plugged in (helper signal, or the app was launched for
+    // it with --usb-autostart): try wired Android Auto for a short while.
+    // launched = the app was started just for this, so it closes again if no
+    // car answers (e.g. the cable goes to a computer).
+    void startUsbAuto(bool launched);
     QString trafficKey() const;
     void setTrafficKey(const QString &key);
     bool trafficEnabled() const;
@@ -109,13 +118,19 @@ signals:
     void navAppChanged();
     void mediaAppChanged();
     void autoStartChanged();
+    void usbAutoStartChanged();
     void trafficKeyChanged();
     void trafficEnabledChanged();
     void batteryCapacityKwhChanged();
 
+private slots:
+    void onCablePlugged();
+
 private:
+    void syncUsbAutoStartUnit();
     void setState(const QString &state);
     void appendLog(const QString &line);
+    void scrubOldLog();
     void startSession(Transport *transport);
     void endSession(const QString &reason);
     void launchBackendApps();
@@ -127,6 +142,11 @@ private:
 
     QQmlEngine *m_engine;
     QSettings m_settings;
+    bool m_logLocation = false; // keep GPS positions in the log (setting logLocation)
+    bool m_usbAuto = false;         // the running USB attempt was started by a cable plug
+    bool m_usbAutoLaunched = false; // ... and the app was launched just for it
+    int m_usbAutoPrevMode = 0;      // the mode to put back if no car answers
+    QTimer m_usbAutoTimer;
     AppRegistry *m_apps;
     MprisController *m_mpris;
     PhoneManager *m_phone;

@@ -2,6 +2,7 @@
 
 #include <QImage>
 #include <QObject>
+#include <QPointF>
 #include <QRect>
 #include <QSize>
 #include <QString>
@@ -40,6 +41,9 @@ class CarScreen : public QObject
     // Map orientation (false = north-up, true = heading-up), toggled by the compass
     // button on the car map and persisted by the Controller.
     Q_PROPERTY(bool mapHeadingUp READ mapHeadingUp WRITE setMapHeadingUp NOTIFY mapHeadingUpChanged)
+    // Last GPS position (x = latitude, y = longitude; null = none yet), kept
+    // across starts so the map opens where the car was, from cached tiles.
+    Q_PROPERTY(QPointF lastFix READ lastFix WRITE setLastFix NOTIFY lastFixChanged)
     // Saved places for the destination search, persisted by the Controller:
     // places = {home: {label, lat, lon}, work: {...}} (a key is absent when
     // unset); recentPlaces = newest-first [{label, lat, lon}], at most 8.
@@ -74,6 +78,8 @@ public:
     void setTrafficEnabled(bool on);
     bool mapHeadingUp() const { return m_mapHeadingUp; }
     void setMapHeadingUp(bool on);
+    QPointF lastFix() const { return m_lastFix; }
+    void setLastFix(const QPointF &fix);
 
     QVariantMap places() const { return m_places; }
     QVariantList recentPlaces() const { return m_recentPlaces; }
@@ -119,6 +125,7 @@ signals:
     void trafficKeyChanged();
     void trafficEnabledChanged();
     void mapHeadingUpChanged();
+    void lastFixChanged();
     void placesChanged();
     void energyChanged();
     void logMessage(const QString &line);
@@ -141,6 +148,7 @@ private:
     QString m_trafficKey;
     bool m_trafficEnabled = true;
     bool m_mapHeadingUp = false;
+    QPointF m_lastFix;
     double m_evCapacityKwh = 0;
     QVariantMap m_places;
     QVariantList m_recentPlaces;

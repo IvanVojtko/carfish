@@ -1,0 +1,12 @@
+# Opens Carfish when a USB cable is plugged in (setting "Start when a USB cable
+# is plugged in"; the app enables/disables this unit). carfish-helper (root)
+# watches the cable and writes the trigger file when Carfish isn't running.
+[Unit]
+Description=Open Carfish when a USB cable is plugged in
+
+[Path]
+PathModified=/run/carfish/usb-plugged
+Unit=carfish-usb-autostart.service
+
+[Install]
+WantedBy=user-session.target
