@@ -1528,10 +1528,11 @@ void Session::dispatchKey(quint32 keycode, bool down, bool longpress)
             media += QStringLiteral("-long");
         log(tr("media key: %1").arg(media));
         emit mediaKey(media);
-        // Reflect transport state in the (mock) car UI where it makes sense.
-        if (media == QLatin1String("play-pause") || media == QLatin1String("play")
-                || media == QLatin1String("pause"))
-            m_screen->setCarProperty(QStringLiteral("playing"), media != QLatin1String("pause"));
+        // Reflect explicit play/pause in the (mock) car UI. Not "play-pause":
+        // that forced the icon to "playing" on every press; the real state
+        // comes from the player (MPRIS) a moment later.
+        if (media == QLatin1String("play") || media == QLatin1String("pause"))
+            m_screen->setCarProperty(QStringLiteral("playing"), media == QLatin1String("play"));
     } else {
         log(tr("nav key: %1").arg(nav));
         emit navKey(nav);

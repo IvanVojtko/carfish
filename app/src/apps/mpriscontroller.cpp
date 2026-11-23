@@ -1,5 +1,8 @@
 #include "mpriscontroller.h"
 
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+
 #include <QDBusArgument>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
@@ -32,6 +35,11 @@ MprisController::MprisController(QObject *parent)
     // something is playing to drive the now-playing progress bar.
     m_posTimer.setInterval(1000);
     connect(&m_posTimer, &QTimer::timeout, this, &MprisController::pollPosition);
+    // Not every player announces its changes: the play/pause icon stayed stale
+    // after a tap (the PlayPause went through, no PropertiesChanged followed).
+    // Check the status every 2 s, asynchronously, and re-read on a mismatch.
+    m_stateTimer.setInterval(2000);
+    connect(&m_stateTimer, &QTimer::timeout, this, &MprisController::checkState);
     refresh();
 }
 
@@ -46,6 +54,45 @@ void MprisController::pollPosition()
         m_positionUs = reply.arguments().first().value<QDBusVariant>().variant().toLongLong();
         emit positionChanged();
     }
+}
+
+void MprisController::checkState()
+{
+    if (m_service.isEmpty())
+        return;
+    QDBusMessage msg = QDBusMessage::createMethodCall(m_service, kPath, kPropsIface, QStringLiteral("GetAll"));
+    msg << kPlayerIface;
+    const QString svc = m_service;
+    auto *w = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(msg, 3000), this);
+    connect(w, &QDBusPendingCallWatcher::finished, this, [this, w, svc] {
+        w->deleteLater();
+        QDBusPendingReply<QVariantMap> reply = *w;
+        if (reply.isError() || svc != m_service)
+            return;
+        const QVariantMap props = reply.value();
+        const bool playing = props.value(QStringLiteral("PlaybackStatus")).toString() == QLatin1String("Playing");
+        QVariantMap meta;
+        const QVariant mv = props.value(QStringLiteral("Metadata"));
+        if (mv.canConvert<QDBusArgument>())
+            mv.value<QDBusArgument>() >> meta;
+        else
+            meta = mv.toMap();
+        const QVariant tid = meta.value(QStringLiteral("mpris:trackid"));
+        const QString trackId = tid.canConvert<QDBusObjectPath>() ? tid.value<QDBusObjectPath>().path()
+                                                                  : tid.toString();
+        if (playing != m_playing || (!trackId.isEmpty() && trackId != m_trackId)) {
+            qCInfo(lcMpris) << "player changed without notifying (playing" << playing << "); re-reading";
+            readState();
+        }
+    });
+}
+
+// After a command, look again shortly so the controls follow the player within
+// a fraction of a second even when it sends no PropertiesChanged.
+void MprisController::confirmSoon()
+{
+    for (int ms : { 250, 700, 1500, 3000 })
+        QTimer::singleShot(ms, this, &MprisController::checkState);
 }
 
 QStringList MprisController::players() const
@@ -152,11 +199,13 @@ void MprisController::selectPlayer(const QString &service)
         setPlayerConnected(m_service, true);
         qCInfo(lcMpris) << "active player:" << m_service;
         readState();
+        m_stateTimer.start();
     } else {
         m_playing = false;
         m_title = m_artist = m_album = m_artUrl = m_trackId = QString();
         m_positionUs = m_lengthUs = 0;
         m_posTimer.stop();
+        m_stateTimer.stop();
         emit changed();
         if (!m_queue.isEmpty()) {
             m_queue.clear();
@@ -218,6 +267,7 @@ void MprisController::call(const QString &method)
     QDBusMessage msg = QDBusMessage::createMethodCall(m_service, kPath, kPlayerIface, method);
     QDBusConnection::sessionBus().asyncCall(msg);
     qCInfo(lcMpris) << method << "->" << m_service;
+    confirmSoon();
 }
 
 // Read the optional MPRIS TrackList interface: the Tracks property is an array

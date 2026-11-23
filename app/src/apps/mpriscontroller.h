@@ -82,6 +82,8 @@ private:
     void call(const QString &method);
     void readState();                        // pull Metadata + PlaybackStatus + length
     void pollPosition();                     // poll the player's Position (not in PropertiesChanged)
+    void checkState();                       // async: re-read if status/track changed unannounced
+    void confirmSoon();                      // re-check a few times after a transport command
     void setPlayerConnected(const QString &service, bool on);
 
     QString m_service;        // the chosen player's bus name, empty if none
@@ -90,6 +92,7 @@ private:
     qint64 m_positionUs = 0;  // current position, microseconds
     qint64 m_lengthUs = 0;    // track length (mpris:length), microseconds
     QTimer m_posTimer;        // ticks Position while playing
+    QTimer m_stateTimer;      // safety net for players that skip PropertiesChanged
     QString m_trackId;        // mpris:trackid of the current track (queue highlight)
     QVariantList m_queue;     // current TrackList entries
     bool m_wantQueue = false; // keep the queue refreshed after the user opened it
