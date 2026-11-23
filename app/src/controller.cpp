@@ -72,6 +72,17 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
             setTrafficEnabled(m_screen->trafficEnabled());
     });
     m_screen->setMapHeadingUp(mapHeadingUp());
+    // Car Settings screen: day/night theme and driving side, saved as changed.
+    m_screen->setThemeMode(m_settings.value(QStringLiteral("themeMode"), QStringLiteral("auto")).toString());
+    m_screen->setRightHandDrive(m_settings.value(QStringLiteral("rightHandDrive"), false).toBool());
+    connect(m_screen, &CarScreen::themeModeChanged, this, [this] {
+        m_settings.setValue(QStringLiteral("themeMode"), m_screen->themeMode());
+        m_settings.sync();
+    });
+    connect(m_screen, &CarScreen::rightHandDriveChanged, this, [this] {
+        m_settings.setValue(QStringLiteral("rightHandDrive"), m_screen->rightHandDrive());
+        m_settings.sync();
+    });
     m_screen->setEvCapacityKwh(batteryCapacityKwh());
     // Saved places (Home/Work + recent destinations) for the car's search screen.
     m_screen->loadPlaces(m_settings.value(QStringLiteral("places")).toMap(),

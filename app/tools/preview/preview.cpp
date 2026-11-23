@@ -21,6 +21,8 @@ class PreviewScreen : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool nightMode READ nightMode WRITE setNightMode NOTIFY nightModeChanged)
+    Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
+    Q_PROPERTY(bool rightHandDrive READ rightHandDrive WRITE setRightHandDrive NOTIFY rightHandDriveChanged)
     Q_PROPERTY(QString trafficKey READ trafficKey WRITE setTrafficKey NOTIFY trafficKeyChanged)
     Q_PROPERTY(bool trafficEnabled READ trafficEnabled WRITE setTrafficEnabled NOTIFY trafficEnabledChanged)
     Q_PROPERTY(bool mapHeadingUp READ mapHeadingUp WRITE setMapHeadingUp NOTIFY mapHeadingUpChanged)
@@ -31,13 +33,34 @@ class PreviewScreen : public QObject
     Q_PROPERTY(bool evElectric READ evElectric NOTIFY energyChanged)
     Q_PROPERTY(bool evLow READ evLow NOTIFY energyChanged)
 public:
-    bool nightMode() const { return m_night; }
+    // Same rule as CarScreen: themeMode "day"/"night" overrides the sensor.
+    bool nightMode() const
+    {
+        return m_theme == QLatin1String("day") ? false : m_theme == QLatin1String("night") ? true : m_night;
+    }
     void setNightMode(bool n)
     {
         if (n == m_night)
             return;
         m_night = n;
         emit nightModeChanged();
+    }
+    QString themeMode() const { return m_theme; }
+    void setThemeMode(const QString &t)
+    {
+        if (t == m_theme)
+            return;
+        m_theme = t;
+        emit themeModeChanged();
+        emit nightModeChanged();
+    }
+    bool rightHandDrive() const { return m_rhd; }
+    void setRightHandDrive(bool on)
+    {
+        if (on == m_rhd)
+            return;
+        m_rhd = on;
+        emit rightHandDriveChanged();
     }
     QString trafficKey() const { return m_trafficKey; }
     void setTrafficKey(const QString &k)
@@ -110,11 +133,15 @@ signals:
     void trafficKeyChanged();
     void trafficEnabledChanged();
     void mapHeadingUpChanged();
+    void themeModeChanged();
+    void rightHandDriveChanged();
     void placesChanged();
     void energyChanged();
 
 private:
     bool m_night = false;
+    QString m_theme = QStringLiteral("auto");
+    bool m_rhd = false;
     QString m_trafficKey;
     bool m_trafficEnabled = true;
     bool m_headingUp = false;
@@ -254,6 +281,10 @@ int main(int argc, char **argv)
         return 1;
     if (!qgetenv("PREVIEW_NIGHT").isEmpty())
         screen.setNightMode(true);
+    // PREVIEW_RHD=1: right-hand-drive (mirrored) layout. PREVIEW_THEME=day|night|auto.
+    screen.setRightHandDrive(!qgetenv("PREVIEW_RHD").isEmpty());
+    if (!qgetenv("PREVIEW_THEME").isEmpty())
+        screen.setThemeMode(QString::fromLocal8Bit(qgetenv("PREVIEW_THEME")));
 
     if (rawW > 0 && rawH > 0)
         view.resize(rawW, rawH);

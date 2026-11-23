@@ -122,12 +122,44 @@ QObject *CarScreen::navBridge() const
     return m_navBridge;
 }
 
+bool CarScreen::nightMode() const
+{
+    if (m_themeMode == QLatin1String("day"))
+        return false;
+    if (m_themeMode == QLatin1String("night"))
+        return true;
+    return m_nightMode;
+}
+
 void CarScreen::setNightMode(bool night)
 {
     if (m_nightMode == night)
         return;
+    const bool before = nightMode();
     m_nightMode = night;
-    emit nightModeChanged();
+    if (nightMode() != before)
+        emit nightModeChanged();
+}
+
+void CarScreen::setThemeMode(const QString &mode)
+{
+    const QString m = (mode == QLatin1String("day") || mode == QLatin1String("night"))
+        ? mode : QStringLiteral("auto");
+    if (m_themeMode == m)
+        return;
+    const bool before = nightMode();
+    m_themeMode = m;
+    emit themeModeChanged();
+    if (nightMode() != before)
+        emit nightModeChanged();
+}
+
+void CarScreen::setRightHandDrive(bool on)
+{
+    if (m_rightHandDrive == on)
+        return;
+    m_rightHandDrive = on;
+    emit rightHandDriveChanged();
 }
 
 void CarScreen::setTrafficKey(const QString &key)

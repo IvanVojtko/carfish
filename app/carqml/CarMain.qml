@@ -20,6 +20,8 @@ Rectangle {
     Component.onCompleted: {
         if (typeof previewExpanded !== "undefined" && previewExpanded === "1")
             root.mapExpanded = true
+        if (typeof previewPane !== "undefined" && previewPane.length)
+            root.activeApp = previewPane
         if (typeof previewSearch !== "undefined" && previewSearch === "1") {
             root.mapExpanded = true; root.searching = true
             root.searchText = (typeof previewSearchText !== "undefined" && previewSearchText)
@@ -123,8 +125,13 @@ Rectangle {
     readonly property real pad: Math.round(root.unit * 0.025)
     readonly property real rad: Math.round(root.unit * 0.03)
 
+    // Right-hand drive (car Settings screen): the whole layout mirrors so the
+    // nav rail and map controls sit on the driver's side.
+    readonly property bool rhd: typeof carScreen !== "undefined" && !!carScreen
+                                && carScreen.rightHandDrive === true
+
     // content box (next to / above the rail)
-    readonly property real cx: root.landscape ? root.railT : 0
+    readonly property real cx: root.landscape && !root.rhd ? root.railT : 0
     readonly property real cw: root.landscape ? width - root.railT : width
     readonly property real ch: root.landscape ? height : height - root.railT
 
@@ -135,14 +142,14 @@ Rectangle {
     readonly property real sh: root.ch - root.pad * 2
 
     // which rail item is active: "maps"/"media" show the dashboard, "apps" the
-    // app launcher, "phone" the phone screen.
+    // app launcher, "phone" the phone screen, "settings" the car settings.
     readonly property bool onDash: activeApp === "maps" || activeApp === "media"
 
     // Map dominates (like Android Auto); the now-playing pane is a thin strip.
     readonly property real mapSplit: 0.76
     readonly property real mapW: root.landscape ? Math.round(root.sw * root.mapSplit - root.pad / 2) : root.sw
     readonly property real mapH: root.landscape ? root.sh : Math.round(root.sh * root.mapSplit - root.pad / 2)
-    readonly property real medX: root.landscape ? root.sx + root.mapW + root.pad : root.sx
+    readonly property real medX: root.landscape ? (root.rhd ? root.sx : root.sx + root.mapW + root.pad) : root.sx
     readonly property real medY: root.landscape ? root.sy : root.sy + root.mapH + root.pad
     readonly property real medW: root.landscape ? root.sw - root.mapW - root.pad : root.sw
     readonly property real medH: root.landscape ? root.sh : root.sh - root.mapH - root.pad
@@ -424,6 +431,22 @@ Rectangle {
                     ctx.lineTo(w * 0.52, h * 0.42);
                     ctx.closePath();
                     ctx.fill();
+                } else if (name === "settings") {
+                    // gear: a thick ring with eight square teeth
+                    var gx = w * 0.5, gy = h * 0.5;
+                    ctx.lineCap = "butt";
+                    ctx.lineWidth = Math.max(2, w * 0.13);
+                    for (var t = 0; t < 8; t++) {
+                        var a = t * Math.PI / 4;
+                        ctx.beginPath();
+                        ctx.moveTo(gx + Math.cos(a) * w * 0.24, gy + Math.sin(a) * h * 0.24);
+                        ctx.lineTo(gx + Math.cos(a) * w * 0.38, gy + Math.sin(a) * h * 0.38);
+                        ctx.stroke();
+                    }
+                    ctx.lineWidth = Math.max(2, w * 0.12);
+                    ctx.beginPath();
+                    ctx.arc(gx, gy, w * 0.21, 0, 2 * Math.PI);
+                    ctx.stroke();
                 } else if (name === "recent") {
                     ctx.beginPath();
                     ctx.arc(w * 0.5, h * 0.5, w * 0.32, 0, 2 * Math.PI);
@@ -440,7 +463,7 @@ Rectangle {
     Rectangle {
         id: rail
         color: root.surface
-        x: 0
+        x: root.landscape && root.rhd ? root.width - root.railT : 0
         y: root.landscape ? 0 : root.height - root.railT
         width: root.landscape ? root.railT : root.width
         height: root.landscape ? root.height : root.railT
@@ -451,12 +474,15 @@ Rectangle {
             ListElement { key: "media"; icon: "media" }
             ListElement { key: "phone"; icon: "phone" }
             ListElement { key: "apps"; icon: "apps" }
+            ListElement { key: "settings"; icon: "settings" }
         }
 
         Grid {
             anchors.centerIn: parent
             columns: root.landscape ? 1 : navModel.count
             rows: root.landscape ? navModel.count : 1
+            // Right-hand drive: Maps nearest the driver on a bottom rail too.
+            layoutDirection: root.rhd ? Qt.RightToLeft : Qt.LeftToRight
             columnSpacing: root.pad
             rowSpacing: root.pad * 1.3
             Repeater {
@@ -498,7 +524,9 @@ Rectangle {
     Rectangle {
         id: mapPane
         visible: root.onDash
-        x: root.sx; y: root.sy
+        // Right-hand drive: the map hugs the rail on the right.
+        x: root.rhd ? root.sx + root.sw - width : root.sx
+        y: root.sy
         width: root.mapExpanded ? root.sw : root.mapW
         // Full-screen: the map fills the area but leaves a strip at the bottom for
         // the now-playing status bar, so the music bar sits UNDER the map rather
@@ -528,7 +556,8 @@ Rectangle {
         // search bar (shown when not navigating)
         Rectangle {
             visible: !root.navigating
-            x: root.pad; y: root.pad
+            x: root.rhd ? parent.width - width - root.pad : root.pad
+            y: root.pad
             width: Math.min(parent.width - root.pad * 2, root.unit * 0.46)
             height: Math.round(root.unit * 0.082)
             radius: height / 2
@@ -558,13 +587,16 @@ Rectangle {
         }
 
         // Map controls live on the LEFT edge (like Google Maps), stacked below the
-        // search pill / turn card so they never overlap it.
+        // search pill / turn card so they never overlap it. With right-hand
+        // drive everything here mirrors (LayoutMirroring flips each control's
+        // anchors), so the controls sit on the driver's side.
         readonly property real ctrlTop: root.pad + Math.round(root.unit * 0.12) + root.pad
 
         // traffic toggle: shown only when a TomTom key is configured.
         // Flips the live traffic overlay on/off; the Controller persists the state.
         Rectangle {
             id: trafficBtn
+            LayoutMirroring.enabled: root.rhd
             visible: typeof carScreen !== "undefined" && carScreen && carScreen.trafficKey !== ""
             property bool on: visible && carScreen.trafficEnabled
             anchors.left: parent.left; anchors.top: parent.top
@@ -603,6 +635,7 @@ Rectangle {
         // Maps. The needle rotates to point to actual north on screen.
         Rectangle {
             id: compassBtn
+            LayoutMirroring.enabled: root.rhd
             visible: root.navMap !== null
             property real mapRot: (root.navMap && root.navMap.headingUp) ? -root.navMap._dispHeading : 0
             property bool headingUp: root.navMap ? root.navMap.headingUp : false
@@ -643,6 +676,7 @@ Rectangle {
         // live GPS speed. Hidden until we have a valid fix.
         Rectangle {
             id: speedBadge
+            LayoutMirroring.enabled: root.rhd
             visible: root.navMap !== null && root.navMap.speedKmh >= 0
             anchors.right: parent.right; anchors.bottom: parent.bottom
             anchors.margins: root.pad
@@ -673,6 +707,7 @@ Rectangle {
         // sign, white with a red ring. Hidden when the road's limit is unknown.
         Rectangle {
             id: limitSign
+            LayoutMirroring.enabled: root.rhd
             visible: speedBadge.visible && root.navMap.speedLimit > 0
             anchors.right: speedBadge.left; anchors.rightMargin: root.pad * 0.5
             anchors.verticalCenter: speedBadge.verticalCenter
@@ -698,7 +733,8 @@ Rectangle {
         Rectangle {
             id: turnCard
             visible: root.navigating
-            x: root.pad; y: root.pad
+            x: root.rhd ? parent.width - width - root.pad : root.pad
+            y: root.pad
             width: Math.min(parent.width - root.pad * 2, root.unit * 0.52)
             height: root.unit * 0.12
             radius: root.rad * 0.7
@@ -759,6 +795,7 @@ Rectangle {
         // opens nearby charging stations.
         Rectangle {
             id: lowBattCard
+            LayoutMirroring.enabled: root.rhd
             readonly property int pct: root.navMap ? root.navMap.evArrivalPct : -1
             visible: root.navigating && pct >= 0 && pct <= 10 && !(root.navMap && root.navMap.finalDest)
             anchors.left: tripCard.left; anchors.bottom: tripCard.top; anchors.bottomMargin: root.pad * 0.5
@@ -793,6 +830,7 @@ Rectangle {
         // Heading to a charging stop: say where the trip continues afterwards.
         Rectangle {
             id: stopCard
+            LayoutMirroring.enabled: root.rhd
             visible: root.navigating && root.navMap !== null && !!root.navMap.finalDest
             anchors.left: tripCard.left; anchors.bottom: tripCard.top; anchors.bottomMargin: root.pad * 0.5
             height: Math.round(root.unit * 0.075)
@@ -821,6 +859,7 @@ Rectangle {
         // After a charging stop: one tap continues to the original destination.
         Rectangle {
             id: resumeCard
+            LayoutMirroring.enabled: root.rhd
             visible: !root.navigating && root.navMap !== null && !!root.navMap.resumeDest
             anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.margins: root.pad
             height: Math.round(root.unit * 0.115)
@@ -859,6 +898,7 @@ Rectangle {
         // small button to end navigation.
         Rectangle {
             id: tripCard
+            LayoutMirroring.enabled: root.rhd
             visible: root.navigating
             anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.margins: root.pad
             height: Math.round(root.unit * 0.115)
@@ -1185,6 +1225,117 @@ Rectangle {
     Connections {
         target: (typeof phone !== "undefined") ? phone : null
         onCallChanged: if (phone && phone.hasCall) root.activeApp = "phone"
+    }
+
+    // ------------------------------------------------------------- settings
+    // Car-side settings, big touch targets. Values live on carScreen (the
+    // Controller saves them): driving side mirrors the layout, theme forces
+    // day/night or follows the car's light sensor.
+    Rectangle {
+        id: settingsView
+        visible: root.activeApp === "settings"
+        x: root.sx; y: root.sy; width: root.sw; height: root.sh
+        radius: root.rad
+        color: root.surface
+        clip: true
+
+        readonly property bool ok: typeof carScreen !== "undefined" && !!carScreen
+        function current(key) {
+            if (!ok) return ""
+            if (key === "side") return carScreen.rightHandDrive ? "rhd" : "lhd"
+            return carScreen.themeMode
+        }
+        function pick(key, v) {
+            if (!ok) return
+            if (key === "side") carScreen.rightHandDrive = (v === "rhd")
+            else carScreen.themeMode = v
+        }
+
+        Text {
+            id: settingsTitle
+            x: root.pad * 1.3; y: root.pad
+            color: root.fg; font.bold: true; font.pixelSize: root.unit * 0.05
+            text: "Settings"
+        }
+        Flickable {
+            anchors.fill: parent
+            anchors.topMargin: settingsTitle.y + settingsTitle.height + root.pad
+            anchors.leftMargin: root.pad * 1.3; anchors.rightMargin: root.pad * 1.3
+            anchors.bottomMargin: root.pad
+            contentHeight: settingsCol.height
+            clip: true
+            Column {
+                id: settingsCol
+                width: parent.width
+                spacing: root.pad * 1.6
+                Repeater {
+                    model: [
+                        { key: "side", title: "Driving side",
+                          sub: "Puts the menu and map buttons on the driver's side",
+                          opts: [ { v: "lhd", label: "Left-hand drive" },
+                                  { v: "rhd", label: "Right-hand drive" } ] },
+                        { key: "theme", title: "Day / night",
+                          sub: "Auto follows the car's light sensor",
+                          opts: [ { v: "auto", label: "Auto" },
+                                  { v: "day", label: "Day" },
+                                  { v: "night", label: "Night" } ] }
+                    ]
+                    Column {
+                        width: settingsCol.width
+                        spacing: root.pad * 0.6
+                        readonly property var sec: modelData
+                        Text {
+                            color: root.fg; font.bold: true
+                            font.pixelSize: root.unit * 0.04
+                            text: sec.title
+                        }
+                        Text {
+                            width: parent.width
+                            color: root.dim; font.pixelSize: root.unit * 0.03
+                            wrapMode: Text.WordWrap
+                            text: sec.sub + (sec.key === "theme" && settingsView.current("theme") === "auto"
+                                             ? " (now " + (root.night ? "night" : "day") + ")" : "")
+                        }
+                        // segmented control
+                        Rectangle {
+                            width: Math.min(parent.width, root.unit * 1.1)
+                            height: Math.round(root.unit * 0.1)
+                            radius: height / 2
+                            color: root.surface2
+                            Row {
+                                id: seg
+                                anchors.fill: parent
+                                anchors.margins: Math.round(parent.height * 0.08)
+                                Repeater {
+                                    model: sec.opts
+                                    Rectangle {
+                                        readonly property bool on: settingsView.current(sec.key) === modelData.v
+                                        width: seg.width / sec.opts.length
+                                        height: seg.height
+                                        radius: height / 2
+                                        color: on ? root.accent : "transparent"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            width: parent.width - root.pad
+                                            horizontalAlignment: Text.AlignHCenter
+                                            elide: Text.ElideRight
+                                            color: parent.on ? "white" : root.fg
+                                            font.bold: parent.on
+                                            font.pixelSize: root.unit * 0.034
+                                            text: modelData.label
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: settingsView.pick(sec.key, modelData.v)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- phone

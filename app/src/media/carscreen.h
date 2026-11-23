@@ -24,7 +24,14 @@ class QQuickWindow;
 class CarScreen : public QObject
 {
     Q_OBJECT
+    // Effective night mode for the car UI: the head unit's night sensor when
+    // themeMode is "auto", else forced by themeMode "day" / "night" (a setting
+    // on the car's Settings screen, persisted by the Controller).
     Q_PROPERTY(bool nightMode READ nightMode NOTIFY nightModeChanged)
+    Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
+    // Right-hand drive: the car UI mirrors (nav rail and map controls on the
+    // right, the driver's side). Set on the car's Settings screen.
+    Q_PROPERTY(bool rightHandDrive READ rightHandDrive WRITE setRightHandDrive NOTIFY rightHandDriveChanged)
     // Live traffic overlay (TomTom). The key is user-supplied (phone settings);
     // the toggle is flipped from a button on the car map and persisted by the
     // Controller. Both are read by the map QML as carScreen.trafficKey / .trafficEnabled.
@@ -54,8 +61,12 @@ public:
     bool start(const QUrl &qml, const QSize &size, int fps, QString *error, const QRect &contentRect = QRect());
     void stop();
 
-    bool nightMode() const { return m_nightMode; }
-    void setNightMode(bool night);
+    bool nightMode() const;
+    void setNightMode(bool night);   // the head unit's sensor
+    QString themeMode() const { return m_themeMode; }
+    void setThemeMode(const QString &mode);
+    bool rightHandDrive() const { return m_rightHandDrive; }
+    void setRightHandDrive(bool on);
 
     QString trafficKey() const { return m_trafficKey; }
     void setTrafficKey(const QString &key);
@@ -102,6 +113,8 @@ public:
 signals:
     void frameReady(const QImage &rgba);
     void nightModeChanged();
+    void themeModeChanged();
+    void rightHandDriveChanged();
     void trafficKeyChanged();
     void trafficEnabledChanged();
     void mapHeadingUpChanged();
@@ -121,7 +134,9 @@ private:
     QQmlComponent *m_component = nullptr;
     QQuickItem *m_root = nullptr;
     QTimer m_frameTimer;
-    bool m_nightMode = false;
+    bool m_nightMode = false;        // sensor value
+    QString m_themeMode = QStringLiteral("auto");
+    bool m_rightHandDrive = false;
     QString m_trafficKey;
     bool m_trafficEnabled = true;
     bool m_mapHeadingUp = false;
