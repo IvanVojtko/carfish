@@ -11,6 +11,7 @@
 #include <QDateTime>
 #include <QBuffer>
 #include <QDir>
+#include <QFile>
 #include <QImage>
 #include <QPainter>
 #include <QPainterPath>
@@ -68,6 +69,28 @@ static QByteArray iconPng(int size)
     buf.open(QIODevice::WriteOnly);
     img.save(&buf, "PNG");
     return png;
+}
+
+// "Manufacturer Model" like Gearhead's Build.MANUFACTURER + MODEL, from
+// /etc/hw-release (NAME="Jolla Jolla Phone" -> "Jolla Phone").
+static QString phoneModel()
+{
+    QFile f(QStringLiteral("/etc/hw-release"));
+    if (f.open(QIODevice::ReadOnly)) {
+        while (!f.atEnd()) {
+            const QString line = QString::fromUtf8(f.readLine()).trimmed();
+            if (!line.startsWith(QLatin1String("NAME=")))
+                continue;
+            QString name = line.mid(5);
+            name.remove(QLatin1Char('"'));
+            QStringList words = name.split(QLatin1Char(' '), QString::SkipEmptyParts);
+            if (words.size() > 1 && words[0].compare(words[1], Qt::CaseInsensitive) == 0)
+                words.removeFirst();
+            if (!words.isEmpty())
+                return words.join(QLatin1Char(' '));
+        }
+    }
+    return QStringLiteral("Sailfish OS");
 }
 
 static QSize resolutionSize(int res)
@@ -295,6 +318,13 @@ void Session::onControl(const Message &msg)
         qToBigEndian<quint16>(replyMinor, p + 2);
         qToBigEndian<quint16>(quint16(STATUS_SUCCESS), p + 4);
         send(0, MSG_VERSION_RESPONSE, resp);
+        if (legacyHeadUnit()) {
+            // Head units before 1.6 get Gearhead's exact handshake (see the
+            // service discovery request below); 1.6+ (e.g. Ford SYNC 4) keeps
+            // the one verified in the field.
+            m_cryptor.requestPeerCertificate();
+            log(tr("older head unit (protocol < 1.6): using the stock phone's exact handshake"));
+        }
         m_phase = Phase::Handshake;
         emit stateChanged(tr("TLS handshake"));
         break;
@@ -324,22 +354,29 @@ void Session::onControl(const Message &msg)
         m_encrypt = true;
         m_phase = Phase::Discovery;
         emit stateChanged(tr("Service discovery"));
-        // Like Gearhead: three PNG icons (32/64/128), a label and
-        // "Manufacturer Model". Some head units (older Hyundai, protocol 1.0)
-        // never answer a request without the icons.
         ServiceDiscoveryRequest req;
-        const QByteArray small = iconPng(32), medium = iconPng(64), large = iconPng(128);
-        if (!small.isEmpty())
+        QByteArray small, medium, large;
+        if (legacyHeadUnit()) {
+            // Exactly what Gearhead sends (as F-Auto does too): 32/64/128 px PNG
+            // icons, the label "Android" and "Manufacturer Model". The Hyundai
+            // i30N (protocol 1.0) never answered our bare request.
+            small = iconPng(32);
+            medium = iconPng(64);
+            large = iconPng(128);
             req.set_small_icon(small.constData(), size_t(small.size()));
-        if (!medium.isEmpty())
             req.set_medium_icon(medium.constData(), size_t(medium.size()));
-        if (!large.isEmpty())
             req.set_large_icon(large.constData(), size_t(large.size()));
-        req.set_label(m_config.label.toStdString());
-        req.set_device_name(m_config.deviceName.toStdString());
+            req.set_label("Android");
+            req.set_device_name(phoneModel().toStdString());
+        } else {
+            req.set_label(m_config.label.toStdString());
+            req.set_device_name(m_config.deviceName.toStdString());
+        }
         const std::string sdr = req.SerializeAsString();
-        log(tr("ctrl tx service discovery request (%1 B, icons %2/%3/%4 B)")
-                .arg(sdr.size()).arg(small.size()).arg(medium.size()).arg(large.size()));
+        log(tr("ctrl tx service discovery request (%1 B: \"%2\" / \"%3\", icons %4/%5/%6 B)")
+                .arg(sdr.size()).arg(QString::fromStdString(req.label()))
+                .arg(QString::fromStdString(req.device_name()))
+                .arg(small.size()).arg(medium.size()).arg(large.size()));
         send(0, MSG_SERVICE_DISCOVERY_REQUEST, sdr);
         break;
     }

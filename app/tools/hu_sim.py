@@ -58,6 +58,7 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
         self.scale = scale
         self.audio_session = None
         self.ignore_sdr = int(os.environ.get("SIM_IGNORE_SDR", "0"))
+        self.new_tls()
         self.media_audio_channel = None
         self.nav_channel = None          # instrument-cluster nav (service id 6)
         self.np_channel = None           # now playing (media playback status, service id 9)
@@ -105,13 +106,21 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
                         print(f"HU: TLS up ({self.tls.version()} {self.tls.cipher()[0]}), AUTH_COMPLETE")
                         return
 
-    def restart_handshake(self):
+    def new_tls(self):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         ctx.minimum_version = ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        # SIM_CLIENT_CERT=cert.pem:key.pem: present a head-unit certificate
+        # when the phone asks for one (it does for protocol < 1.6).
+        cc = os.environ.get("SIM_CLIENT_CERT")
+        if cc:
+            ctx.load_cert_chain(*cc.split(":"))
         self.inc, self.outg = ssl.MemoryBIO(), ssl.MemoryBIO()
         self.tls = ctx.wrap_bio(self.inc, self.outg, server_side=False)
+
+    def restart_handshake(self):
+        self.new_tls()
         self.tls_done = False
         self.encrypted = False
         self.rx = b""

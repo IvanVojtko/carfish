@@ -168,6 +168,8 @@ private:
     Framer m_framer;
     Cryptor m_cryptor;
     Phase m_phase = Phase::WaitVersion;
+    // Protocol < 1.6: older head units get Gearhead's exact handshake.
+    bool legacyHeadUnit() const { return m_huMajor < 1 || (m_huMajor == 1 && m_huMinor < 6); }
     int m_restarts = 0;          // head-unit-initiated handshake restarts
     bool m_encrypt = false;
     int m_huMajor = 0;

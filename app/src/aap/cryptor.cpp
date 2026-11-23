@@ -74,6 +74,15 @@ bool Cryptor::init(Role role, const QString &certPath, const QString &keyPath, Q
     return true;
 }
 
+void Cryptor::requestPeerCertificate()
+{
+    if (!m_ssl)
+        return;
+    // SSL_VERIFY_PEER on a server sends a CertificateRequest; without
+    // FAIL_IF_NO_PEER_CERT and with an accept-all callback nothing is enforced.
+    SSL_set_verify(m_ssl, SSL_VERIFY_PEER, [](int, X509_STORE_CTX *) { return 1; });
+}
+
 QByteArray Cryptor::drainWrite()
 {
     QByteArray out;

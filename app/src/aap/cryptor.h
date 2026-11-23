@@ -27,6 +27,9 @@ public:
     // application; the user provides it (see README).
     bool init(Role role, const QString &certPath, const QString &keyPath, QString *error);
     void reset();
+    // Server: ask the peer for its certificate in the handshake (and accept
+    // whatever it sends, or none), as Gearhead does. Call before handshake().
+    void requestPeerCertificate();
 
     // Feed handshake bytes from the peer (may be empty to start a client
     // handshake). Returns bytes to send back in an SSL_HANDSHAKE message.
