@@ -1,6 +1,9 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
+#include <QStringList>
+#include <functional>
 #include <QObject>
 #include <QString>
 #include <QTimer>
@@ -56,7 +59,11 @@ private:
 
     // Loopback mode (reverse-engineered from cargadgetd):
     bool ensureCaptureSink(QString *monitor, QString *error); // create/find the capture sink
-    void adoptPlayers();   // redirect media streams into the capture sink
+    void adoptPlayers();   // redirect media streams into the capture sink (blocking; start only)
+    void adoptFrom(const QStringList &sinkInputs, bool async);
+    void pinFrom(const QStringList &sourceOutputs, bool async);
+    static QHash<int, QString> parseSinkNames(const QStringList &shortSinks);
+    void pactlAsync(const QStringList &args, std::function<void(bool, const QStringList &)> done);
     void releasePlayers(); // move them back to real hardware + unload the sink
 
     GstElement *m_pipeline = nullptr;
@@ -78,4 +85,9 @@ private:
     QProcess *m_events = nullptr;       // long-running `pactl subscribe`
     QByteArray m_eventBuf;
     QTimer m_recheck;          // debounced re-check after PulseAudio events
+    QHash<int, QString> m_sinkNames; // sink index -> name (refreshed each check)
+    int m_monitorIdx = -1;     // source index of m_device
+    int m_gen = 0;             // bumps on stop(); stale async pactl results are ignored
+    bool m_checkBusy = false;  // an async re-check chain is running
+    bool m_checkAgain = false; // another was requested meanwhile
 };

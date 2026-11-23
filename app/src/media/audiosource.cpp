@@ -5,6 +5,7 @@
 #include <QLoggingCategory>
 #include <QMetaObject>
 #include <QProcess>
+#include <QVariant>
 
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
@@ -147,7 +148,7 @@ void AudioSource::onPulseEvents()
     if (!m_events)
         return;
     m_eventBuf += m_events->readAllStandardOutput();
-    bool relevant = false;
+    bool relevant = false, urgent = false;
     int nl;
     while ((nl = m_eventBuf.indexOf('\n')) >= 0) {
         const QByteArray line = m_eventBuf.left(nl);
@@ -155,16 +156,24 @@ void AudioSource::onPulseEvents()
         // e.g. "Event 'change' on source-output #42", "Event 'new' on sink-input #7"
         if (line.contains("source-output")) {
             relevant = true;
-            // Our own record stream changed (droid may just have moved it onto
-            // the mic): stop forwarding until it is verified again.
+            // Our own record stream changed: droid may just have moved it onto
+            // the mic, so check now rather than after the debounce. It is NOT
+            // muted on the event itself any more: PulseAudio reports routine
+            // changes on the stream too, and muting on each one (until a
+            // ~150 ms re-check verified it) cut the music in short, frequent
+            // gaps. The check mutes it only if it really left the monitor.
             if (m_captureIdx >= 0 && line.endsWith("#" + QByteArray::number(m_captureIdx)))
-                m_onMonitor = false;
+                urgent = true;
         } else if (line.contains("sink-input")) {
             relevant = true;
         }
     }
-    if (relevant && !m_recheck.isActive())
+    if (urgent) {
+        m_recheck.stop();
+        followActiveSink();
+    } else if (relevant && !m_recheck.isActive()) {
         m_recheck.start();
+    }
 }
 
 // Pick (or, as a last resort, create) a null capture sink and return its
@@ -229,12 +238,31 @@ void AudioSource::adoptPlayers()
 {
     if (m_captureSink.isEmpty())
         return;
+    m_sinkNames = parseSinkNames(pactl({QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sinks")}));
+    adoptFrom(pactl({QStringLiteral("list"), QStringLiteral("sink-inputs")}), false);
+}
+
+QHash<int, QString> AudioSource::parseSinkNames(const QStringList &shortSinks)
+{
+    QHash<int, QString> names;
+    for (const QString &l : shortSinks) {
+        const QStringList c = l.split(QLatin1Char('\t'));
+        if (c.size() >= 2)
+            names.insert(c.at(0).trimmed().toInt(), c.at(1).trimmed());
+    }
+    return names;
+}
+
+// Parse `pactl list sink-inputs`, move media streams into the capture sink and
+// count the uncorked ones already there (the forward/mute gate).
+void AudioSource::adoptFrom(const QStringList &lines, bool async)
+{
     struct In { int idx = -1; QString sink; bool corked = false; bool player = false; QString app; };
     QList<In> inputs;
     In cur;
     bool have = false;
     auto flush = [&] { if (have && cur.idx >= 0) inputs << cur; cur = In(); have = false; };
-    for (const QString &raw : pactl({QStringLiteral("list"), QStringLiteral("sink-inputs")})) {
+    for (const QString &raw : lines) {
         const QString l = raw.trimmed();
         if (l.startsWith(QLatin1String("Sink Input #"))) {
             flush();
@@ -257,18 +285,9 @@ void AudioSource::adoptPlayers()
     }
     flush();
 
-    // Map sink index -> name so we can tell which inputs are already on us / on
-    // a media sink.
-    QHash<int, QString> sinkName;
-    for (const QString &l : pactl({QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sinks")})) {
-        const QStringList c = l.split(QLatin1Char('\t'));
-        if (c.size() >= 2)
-            sinkName.insert(c.at(0).trimmed().toInt(), c.at(1).trimmed());
-    }
-
     int moved = 0, playing = 0;
     for (const In &in : inputs) {
-        const QString name = sinkName.value(in.sink.toInt(), in.sink);
+        const QString name = m_sinkNames.value(in.sink.toInt(), in.sink);
         if (name == m_captureSink) {
             if (!in.corked)
                 ++playing;
@@ -278,17 +297,46 @@ void AudioSource::adoptPlayers()
             || name.contains(QLatin1String("primary_output"));
         if (!in.player && !(onMediaSink && !in.corked))
             continue; // leave ringtones/alarms/system sounds where they are
-        if (QProcess::execute(QStringLiteral("pactl"),
-                              {QStringLiteral("move-sink-input"), QString::number(in.idx), m_captureSink}) == 0) {
-            ++moved;
-            if (!in.corked)
-                ++playing;
-            qCInfo(lcAudio) << "adopted media stream" << in.idx << in.app.trimmed() << "->" << m_captureSink;
+        const QStringList args = {QStringLiteral("move-sink-input"), QString::number(in.idx), m_captureSink};
+        if (async) {
+            pactlAsync(args, [](bool, const QStringList &) {});
+        } else if (QProcess::execute(QStringLiteral("pactl"), args) != 0) {
+            continue;
         }
+        ++moved;
+        if (!in.corked)
+            ++playing;
+        qCInfo(lcAudio) << "adopted media stream" << in.idx << in.app.trimmed() << "->" << m_captureSink;
     }
     m_playingInputs = playing;
     if (moved)
         emit captureChanged(m_device);
+}
+
+// Run pactl WITHOUT blocking: this thread also sends the audio and video to the
+// car, and the routine 2 s re-check used to block it for ~100 ms (4-5 pactl
+// runs of 15-35 ms each on the phone), which starved the car's audio buffer.
+// Callbacks from a previous start() are dropped via the generation counter.
+void AudioSource::pactlAsync(const QStringList &args, std::function<void(bool, const QStringList &)> done)
+{
+    auto *p = new QProcess(this);
+    const int gen = m_gen;
+    auto finish = [this, p, done, gen](bool ok) {
+        if (p->property("done").toBool())
+            return;
+        p->setProperty("done", true);
+        const QStringList lines = ok ? QString::fromUtf8(p->readAllStandardOutput()).split(QLatin1Char('\n'))
+                                     : QStringList();
+        p->deleteLater();
+        if (gen == m_gen)
+            done(ok, lines);
+    };
+    connect(p, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this,
+            [finish](int code, QProcess::ExitStatus st) { finish(st == QProcess::NormalExit && code == 0); });
+    connect(p, &QProcess::errorOccurred, this,
+            [finish](QProcess::ProcessError e) { if (e == QProcess::FailedToStart) finish(false); });
+    QTimer::singleShot(3000, p, [p] { p->kill(); });
+    p->start(QStringLiteral("pactl"), args);
 }
 
 // On stop: move any streams still on the capture sink back to a real speaker
@@ -334,11 +382,20 @@ bool AudioSource::buildPipeline(const QString &src, QString *error)
     const int chunkBytes = (sampleRate >= 44100 ? 2048 : 1024) * channels * 2;
     // client-name lets us find this exact capture stream in `pactl` afterwards so
     // we can force it onto the monitor (see moveCaptureToMonitor).
+    //
+    // Buffering: the old 40 ms capture ring (2 x 20 ms) overran whenever the
+    // capture thread was late by more than ~40 ms (software H.264 encoding and
+    // the UI share the CPU), dropping samples = short, frequent dropouts. The
+    // 20 ms fragments also made the null sink, and so the Android player
+    // feeding it, run in tiny blocks that underrun easily. 400 ms of ring in
+    // 40 ms fragments costs a little latency, which music does not mind.
+    // do-timestamp is gone (arrival-time stamps are jittery and made
+    // audiobuffersplit see discontinuities); gapless keeps it from resyncing.
     const QString desc = QStringLiteral(
-        "pulsesrc client-name=%5 device=%1 do-timestamp=true buffer-time=40000 latency-time=20000 "
+        "pulsesrc client-name=%5 device=%1 buffer-time=400000 latency-time=40000 "
         "! audioconvert ! audioresample "
         "! audio/x-raw,format=S16LE,layout=interleaved,rate=%2,channels=%3 "
-        "! audiobuffersplit output-buffer-size=%4 "
+        "! audiobuffersplit output-buffer-size=%4 gapless=true "
         "! appsink name=sink sync=false max-buffers=50 drop=true")
             .arg(src).arg(sampleRate).arg(channels).arg(chunkBytes).arg(kClientName);
 
@@ -379,10 +436,22 @@ void AudioSource::moveCaptureToMonitor()
         m_onMonitor = false;
         return;
     }
-    const int target = sourceIndexByName(m_device);
+    m_monitorIdx = sourceIndexByName(m_device);
+    pinFrom(pactl({QStringLiteral("list"), QStringLiteral("source-outputs")}), false);
+}
+
+// Parse `pactl list source-outputs`: find our record stream, move it back onto
+// the monitor if droid parked it elsewhere (the mic), and set the gate.
+void AudioSource::pinFrom(const QStringList &lines, bool async)
+{
+    if (!m_pipeline || m_device.isEmpty()) {
+        m_onMonitor = false;
+        return;
+    }
+    const int target = m_monitorIdx;
     int idx = -1, curSource = -1, moved = 0;
     bool found = false, verified = false;
-    for (const QString &raw : pactl({QStringLiteral("list"), QStringLiteral("source-outputs")})) {
+    for (const QString &raw : lines) {
         const QString l = raw.trimmed();
         if (l.startsWith(QLatin1String("Source Output #"))) {
             idx = l.midRef(15).toInt();
@@ -398,19 +467,32 @@ void AudioSource::moveCaptureToMonitor()
             // (and could glitch the audio). When the monitor's index is unknown,
             // move anyway to be safe.
             if (target < 0 || curSource != target) {
-                const int rc = QProcess::execute(QStringLiteral("pactl"),
-                                  {QStringLiteral("move-source-output"), QString::number(idx), m_device});
                 ++moved;
-                verified = (rc == 0);
+                const QStringList args = {QStringLiteral("move-source-output"), QString::number(idx), m_device};
+                if (async) {
+                    // Off the monitor (on the mic): mute until the move lands.
+                    m_onMonitor = false;
+                    pactlAsync(args, [this](bool ok, const QStringList &) {
+                        m_onMonitor = ok && m_pipeline;
+                        if (ok)
+                            emit captureChanged(m_device);
+                    });
+                    verified = false;
+                } else {
+                    verified = QProcess::execute(QStringLiteral("pactl"), args) == 0;
+                }
             } else {
                 verified = true;
             }
         }
     }
-    m_onMonitor = verified;
-    if (moved) {
+    if (!async || !moved)
+        m_onMonitor = verified;
+    if (moved && !async) {
         qCInfo(lcAudio) << "forced capture onto" << m_device;
         emit captureChanged(m_device);
+    } else if (moved) {
+        qCInfo(lcAudio) << "capture was off the monitor; moving it back onto" << m_device;
     } else if (!found) {
         qCWarning(lcAudio) << "capture stream not found to move onto" << m_device;
     }
@@ -429,12 +511,38 @@ void AudioSource::followActiveSink()
 {
     if (!m_pipeline || !m_loopback)
         return;
-    adoptPlayers();
-    moveCaptureToMonitor();
+    if (m_checkBusy) {
+        m_checkAgain = true;
+        return;
+    }
+    m_checkBusy = true;
+    // Our own record stream first (the mic guard), then the players. A failed
+    // or timed-out pactl leaves the previous state alone instead of reading as
+    // "nothing playing" (which muted the car until the next tick).
+    pactlAsync({QStringLiteral("list"), QStringLiteral("source-outputs")}, [this](bool ok, const QStringList &l) {
+        if (ok)
+            pinFrom(l, true);
+        pactlAsync({QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sinks")},
+                   [this](bool ok, const QStringList &l) {
+            if (ok)
+                m_sinkNames = parseSinkNames(l);
+            pactlAsync({QStringLiteral("list"), QStringLiteral("sink-inputs")}, [this](bool ok, const QStringList &l) {
+                if (ok && !m_captureSink.isEmpty())
+                    adoptFrom(l, true);
+                m_checkBusy = false;
+                if (m_checkAgain) {
+                    m_checkAgain = false;
+                    m_recheck.start();
+                }
+            });
+        });
+    });
 }
 
 void AudioSource::stop()
 {
+    ++m_gen; // drop callbacks of pactl runs still in flight
+    m_checkBusy = m_checkAgain = false;
     m_watch.stop();
     m_recheck.stop();
     stopPulseEvents();

@@ -149,6 +149,16 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
     def start_audio(self):
         if self.audio:
             return
+        dump = os.environ.get("SIM_AUDIO_DUMP")
+        if dump:
+            # Write the raw PCM (s16le 48 kHz stereo) to a file instead of the
+            # speakers, e.g. to check a test tone for gaps.
+            class _Dump:
+                def __init__(self, path):
+                    self.stdin = open(path, "wb", buffering=0)
+            self.audio = _Dump(dump)
+            print(f"HU: writing media audio to {dump}")
+            return
         self.audio = subprocess.Popen(
             ["ffplay", "-hide_banner", "-loglevel", "error", "-nodisp", "-autoexit",
              "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0"],
@@ -187,6 +197,11 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
             elif mid == 16:
                 print("HU: BYEBYE")
                 self.running = False
+            elif mid == 18:  # AUDIO_FOCUS_REQUEST -> grant (GAIN), or LOSS on release
+                req = pb.AudioFocusRequest.FromString(body)
+                state = 3 if req.request == 4 else 1
+                print(f"HU: AUDIO_FOCUS_REQUEST {req.request} -> state {state}")
+                self.send(0, 19, pb.AudioFocusNotification(state=state, unsolicited=False).SerializeToString())
             return
         # Guidance the phone pushes to the cluster arrives on the nav channel;
         # dispatch it before the mid-based media handlers (ids overlap).
