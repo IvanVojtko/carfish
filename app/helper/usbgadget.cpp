@@ -17,6 +17,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <future>
 #include <memory>
 #include <thread>
@@ -316,6 +317,25 @@ void UsbGadgetWorker::linkAskAccessory(const QString &gadget, const QString &con
         else
             emit log(QStringLiteral("usb: linked %1 so the car's GET_PROTOCOL is answered").arg(fn));
     }
+    if (!link.isEmpty() && QFileInfo::exists(link)) {
+        // Show the car ONLY the accessory interface while we wait. usb-moded's
+        // charging mode is an empty mass-storage function (0AFE), and some head
+        // units (Hyundai i30N: no AOA START in 5 tries) take a device with a
+        // storage interface for a USB stick and never try Android Auto on it.
+        // An Android phone in charging mode shows a vendor-specific interface
+        // (MTP), which this resembles. restore() restarts usb-moded, which
+        // rebuilds its own functions.
+        const QString cfgDir = gadget + QStringLiteral("/configs/") + config;
+        QStringList hidden;
+        for (const QString &name : QDir(cfgDir).entryList(QDir::NoDotAndDotDot | QDir::System | QDir::Files | QDir::Dirs)) {
+            const QString p = cfgDir + QLatin1Char('/') + name;
+            if (name != fn && QFileInfo(p).isSymLink() && ::unlink(p.toLocal8Bit().constData()) == 0)
+                hidden << name;
+        }
+        if (!hidden.isEmpty())
+            emit log(QStringLiteral("usb: showing the car only the accessory interface (hid %1)")
+                         .arg(hidden.join(QStringLiteral(", "))));
+    }
     if (setUdc(gadget, udc, "reconnect for AOA"))
         emit log(QStringLiteral("usb: reconnected to the car"));
 }
@@ -370,7 +390,72 @@ bool UsbGadgetWorker::waitForStart(QString *model, QString *serial)
         emit log(QStringLiteral("usb: AOA start for model \"%1\" is not Android Auto").arg(m));
         return false;
     };
+    // What the car does on the bus while we wait, for field logs: the UDC
+    // state (attached / addressed / configured / suspended) and the kernel's
+    // USB gadget lines (read live from /dev/kmsg; the ring buffer on these
+    // phones only holds a couple of minutes, so it is gone by log-fetch time).
+    const QString udcState = QStringLiteral("%1/%2/state").arg(QLatin1String(kUdcClass), m_udc);
+    QString lastState;
+    QStringList stateTrail;
+    int kmsg = ::open("/dev/kmsg", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (kmsg >= 0)
+        ::lseek(kmsg, 0, SEEK_END);
+    int kmsgLines = 0, kmsgSpam = 0;
+    QElapsedTimer diagTick;
+    diagTick.start();
+    auto pumpDiag = [&] {
+        const QString st = readTrim(udcState);
+        if (!st.isEmpty() && st != lastState) {
+            stateTrail << QStringLiteral("%1 @%2s").arg(st).arg(total.elapsed() / 1000.0, 0, 'f', 1);
+            if (stateTrail.size() <= 12)
+                emit log(QStringLiteral("usb: bus state %1 (%2 s)").arg(st).arg(total.elapsed() / 1000.0, 0, 'f', 1));
+            lastState = st;
+        }
+        if (kmsg < 0)
+            return;
+        char buf[1024];
+        for (;;) {
+            const ssize_t n = ::read(kmsg, buf, sizeof(buf) - 1);
+            if (n <= 0)
+                break; // EAGAIN (nothing new) or EPIPE (overrun; next read resyncs)
+            buf[n] = 0;
+            QString rec = QString::fromLatin1(buf).trimmed();
+            const int semi = rec.indexOf(QLatin1Char(';'));
+            if (semi >= 0)
+                rec = rec.mid(semi + 1);
+            const QString low = rec.toLower();
+            const bool usb = low.contains(QLatin1String("mtu3")) || low.contains(QLatin1String("acc_"))
+                || low.contains(QLatin1String("accessory")) || low.contains(QLatin1String("android_work"))
+                || low.contains(QLatin1String("gadget")) || low.contains(QLatin1String("configfs"))
+                || low.contains(QLatin1String("usb"));
+            if (!usb || low.contains(QLatin1String("wlan")) || low.contains(QLatin1String("conninfra")))
+                continue;
+            if (low.contains(QLatin1String("suspend_common")) || low.contains(QLatin1String("resume_common"))) {
+                ++kmsgSpam; // mtu3 runtime-PM chatter, just count it
+                continue;
+            }
+            if (kmsgLines++ < 40)
+                emit log(QStringLiteral("usb: kernel: %1").arg(rec.left(200)));
+        }
+    };
+    auto closeDiag = [&] {
+        if (kmsg >= 0)
+            ::close(kmsg);
+        kmsg = -1;
+        if (kmsgLines > 40)
+            emit log(QStringLiteral("usb: kernel: (%1 more USB lines not shown)").arg(kmsgLines - 40));
+        if (kmsgSpam)
+            emit log(QStringLiteral("usb: kernel: %1 controller suspend/resume lines").arg(kmsgSpam));
+        if (stateTrail.size() > 12)
+            emit log(QStringLiteral("usb: bus states: %1").arg(stateTrail.join(QStringLiteral(", "))));
+    };
+    struct DiagGuard { std::function<void()> f; ~DiagGuard() { f(); } } diagGuard{ closeDiag };
+
     while (!m_stop.load()) {
+        if (diagTick.elapsed() >= 100) {
+            diagTick.restart();
+            pumpDiag();
+        }
         if (total.elapsed() > kMaxWaitMs) {
             emit log(QStringLiteral("usb: no Android Auto start within %1 s; giving up").arg(kMaxWaitMs / 1000));
             return false;
