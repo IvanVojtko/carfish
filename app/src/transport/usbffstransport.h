@@ -39,6 +39,7 @@ public:
     void stop() override;
     void write(const QByteArray &data) override;
     QString describe() const override;
+    QString takeStats() override;
 
 private slots:
     void onReadChunk(const QByteArray &data);
@@ -57,6 +58,11 @@ private:
     QMutex m_writeMutex;
     std::atomic_bool m_active{false}; // HU has actually sent bytes
     std::atomic_bool m_dead{false};
+    // ep1 back-pressure since the last takeStats(): how often the host was not
+    // reading (EAGAIN) and the longest a single frame had to wait.
+    int m_waits = 0;
+    int m_maxWaitMs = 0;
+    qint64 m_bytes = 0;
 };
 
 // Blocking ep2 (host->device) reader thread.
@@ -90,6 +96,7 @@ public:
 
 signals:
     void fatal(const QString &error);
+    void note(const QString &line);
 
 protected:
     void run() override;

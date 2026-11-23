@@ -157,6 +157,49 @@ Session::Session(Transport *transport, CarScreen *screen, const Config &config, 
     }
     m_navFlush.setSingleShot(true);
     connect(&m_navFlush, &QTimer::timeout, this, &Session::flushNavGuidance);
+
+    connect(m_transport, &Transport::note, this, &Session::log);
+    m_stats.setInterval(10000);
+    connect(&m_stats, &QTimer::timeout, this, &Session::logStats);
+}
+
+void Session::logStats()
+{
+    if (m_phase != Phase::Running) {
+        m_stats.stop();
+        return;
+    }
+    auto media = [this](int channel, const QString &name) -> QString {
+        if (channel < 0 || !m_channels.contains(quint8(channel)))
+            return QString();
+        ChannelInfo &ch = m_channels[quint8(channel)];
+        QString s = QStringLiteral(", %1 %2 sent/%3 acked").arg(name).arg(ch.txFrames).arg(ch.acks);
+        if (ch.drops)
+            s += QStringLiteral("/%1 dropped").arg(ch.drops);
+        s += QStringLiteral(" (%1/%2 waiting%3)").arg(ch.unacked).arg(ch.maxUnacked)
+                 .arg(ch.started ? QString() : QStringLiteral(", stopped"));
+        ch.txFrames = ch.acks = ch.drops = 0;
+        return s;
+    };
+    QString line = QStringLiteral("stats: rx %1 msgs (last %2 s ago)")
+                       .arg(m_rxMsgs).arg(m_lastRxMs ? (qint64(monotonicUs() / 1000) - m_lastRxMs) / 1000.0 : -1.0, 0, 'f', 1);
+    line += media(m_videoChannel, QStringLiteral("video"));
+    line += media(m_mediaAudioChannel, QStringLiteral("audio"));
+    const QString t = m_transport->takeStats();
+    if (!t.isEmpty())
+        line += QStringLiteral(", ") + t;
+    m_rxMsgs = 0;
+    log(line);
+}
+
+void Session::noteUnhandled(const char *what, quint8 channel, quint16 id, int size)
+{
+    const quint32 key = (quint32(channel) << 16) | id;
+    if (m_unhandledSeen.contains(key))
+        return;
+    m_unhandledSeen.insert(key);
+    log(tr("unhandled %1 message 0x%2 on channel %3 (%4 B)")
+            .arg(QString::fromLatin1(what)).arg(id, 0, 16).arg(channel).arg(size));
 }
 
 Session::~Session()
@@ -260,6 +303,8 @@ void Session::onMessage(const Message &msg)
 {
     if (m_phase == Phase::Closed)
         return;
+    ++m_rxMsgs;
+    m_lastRxMs = qint64(monotonicUs() / 1000);
     if (msg.channel == 0) {
         onControl(msg);
         return;
@@ -415,7 +460,7 @@ void Session::onControl(const Message &msg)
         fail(tr("head unit reported a framing error"));
         break;
     default:
-        qCInfo(lcAap) << "unhandled control message" << msg.id() << body.size() << "bytes";
+        noteUnhandled("control", 0, msg.id(), body.size());
         break;
     }
 }
@@ -594,6 +639,7 @@ void Session::onServiceDiscovery(const QByteArray &body)
         send(it.key(), MSG_CHANNEL_OPEN_REQUEST, req.SerializeAsString(), true);
     }
     m_phase = Phase::Running;
+    m_stats.start();
     emit stateChanged(tr("Opening channels"));
 }
 
@@ -623,10 +669,11 @@ void Session::onChannel(ChannelInfo &ch, quint8 channel, const Message &msg)
             MediaAck ack;
             parse(ack, body);
             ch.unacked = qMax(0, ch.unacked - int(qMax(1u, ack.ack())));
+            ch.acks += int(qMax(1u, ack.ack()));
         } else if (id == MEDIA_VIDEO_FOCUS_NOTIFICATION && ch.kind == Kind::Video) {
             onVideoFocus(ch, channel, body);
         } else {
-            qCInfo(lcAap) << "unhandled media message" << hex << id << "on channel" << channel;
+            noteUnhandled("media", channel, id, body.size());
         }
         break;
     case Kind::Input:
@@ -642,6 +689,8 @@ void Session::onChannel(ChannelInfo &ch, quint8 channel, const Message &msg)
                 log(tr("key binding REJECTED by head unit (status %1)").arg(resp.status()));
             else
                 log(tr("key binding acknowledged"));
+        } else {
+            noteUnhandled("input", channel, id, body.size());
         }
         break;
     case Kind::Sensor:
@@ -649,6 +698,8 @@ void Session::onChannel(ChannelInfo &ch, quint8 channel, const Message &msg)
             onSensorBatch(body);
         else if (id == SENSOR_ERROR)
             log(tr("sensor error from head unit"));
+        else
+            noteUnhandled("sensor", channel, id, body.size());
         break;
     case Kind::Mic:
         if (id == MEDIA_MICROPHONE_RESPONSE)
@@ -658,7 +709,7 @@ void Session::onChannel(ChannelInfo &ch, quint8 channel, const Message &msg)
         else if (id == MEDIA_CONFIG)
             onMediaConfig(ch, channel, body);
         else
-            qCInfo(lcAap) << "unhandled mic message" << hex << id;
+            noteUnhandled("mic", channel, id, body.size());
         break;
     case Kind::Nav:
         // The cluster tells us when it wants guidance (focus on/off).
@@ -671,20 +722,20 @@ void Session::onChannel(ChannelInfo &ch, quint8 channel, const Message &msg)
             m_navClusterReady = false;
             log(tr("instrument cluster released navigation"));
         } else {
-            qCInfo(lcAap) << "unhandled nav message" << hex << id;
+            noteUnhandled("cluster", channel, id, body.size());
         }
         break;
     case Kind::PhoneStatus:
         if (id == PHONE_STATUS_INPUT)
             onPhoneStatusInput(body);
         else
-            qCInfo(lcAap) << "unhandled phone-status message" << hex << id;
+            noteUnhandled("phone-status", channel, id, body.size());
         break;
     case Kind::MediaStatus:
         if (id == MEDIA_PLAYBACK_INPUT)
             onMediaPlaybackInput(body);
         else
-            qCInfo(lcAap) << "unhandled media-playback message" << hex << id;
+            noteUnhandled("now-playing", channel, id, body.size());
         break;
     }
 }
@@ -1012,12 +1063,14 @@ void Session::sendVideoFrame(const QByteArray &au, quint64, bool keyFrame)
         // The phone app waits up to 300 ms, then drops. With a live encoder
         // a drop breaks the reference chain, so ask for a fresh IDR.
         ++m_droppedFrames;
+        ++ch.drops;
         m_keyFramePending = true;
         m_video->requestKeyFrame();
         return;
     }
     m_keyFramePending = false;
     ++ch.unacked;
+    ++ch.txFrames;
     sendMedia(quint8(m_videoChannel), MEDIA_DATA, monotonicUs(), au, true);
 }
 
@@ -1058,9 +1111,12 @@ void Session::sendAudio(const QByteArray &pcm, quint64)
     if (!ch.started)
         return;
     // Audio is ackless from protocol 5.0 on.
-    if (m_huMajor < 5 && ch.unacked >= ch.maxUnacked)
+    if (m_huMajor < 5 && ch.unacked >= ch.maxUnacked) {
+        ++ch.drops;
         return;
+    }
     ++ch.unacked;
+    ++ch.txFrames;
     sendMedia(quint8(m_mediaAudioChannel), MEDIA_DATA, monotonicUs(), pcm, true);
 }
 

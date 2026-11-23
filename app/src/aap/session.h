@@ -113,6 +113,10 @@ private:
         // audio
         int sampleRate = 48000;
         int channels = 2;
+        // diagnostics (per stats interval)
+        int txFrames = 0;
+        int acks = 0;
+        int drops = 0;
     };
 
     void onData(const QByteArray &data);
@@ -216,6 +220,15 @@ private:
     int m_nextSessionId = 1;
     int m_droppedFrames = 0;
     bool m_keyFramePending = false;
+
+    // Periodic health line in the durable log while running, so a session the
+    // car drops shows what stopped first (its acks, its reads, our frames...).
+    void logStats();
+    void noteUnhandled(const char *what, quint8 channel, quint16 id, int size);
+    QTimer m_stats;
+    int m_rxMsgs = 0;
+    qint64 m_lastRxMs = 0;
+    QSet<quint32> m_unhandledSeen;
 };
 
 } // namespace aap

@@ -84,6 +84,7 @@ void UsbFfsTransport::start()
 
     m_pump = new UsbFfsEp0Pump(m_ep0, &m_active);
     connect(m_pump, &UsbFfsEp0Pump::fatal, this, &UsbFfsTransport::onEp0Fatal, Qt::QueuedConnection);
+    connect(m_pump, &UsbFfsEp0Pump::note, this, &Transport::note, Qt::QueuedConnection);
     m_pump->start();
 
     m_reader = new UsbFfsReader(m_ep2);
@@ -160,8 +161,14 @@ void UsbFfsEp0Pump::run()
             const unsigned char type = buf[off + 8];
             switch (type) {
             case FfsEnable:
+                if (m_active->load())
+                    emit note(QStringLiteral("usb: endpoints re-enabled by the car"));
                 enabled = true;
                 qCInfo(lcFfs) << "ep0 ENABLE";
+                break;
+            case FfsResume:
+                if (m_active->load())
+                    emit note(QStringLiteral("usb: bus resumed by the car"));
                 break;
             case FfsSetup:
                 handleSetup(buf + off);
@@ -170,6 +177,10 @@ void UsbFfsEp0Pump::run()
             case FfsSuspend:
             case FfsUnbind:
                 if (m_active->load()) {
+                    emit note(QStringLiteral("usb: car sent %1 during the session")
+                                  .arg(type == FfsDisable ? QStringLiteral("DISABLE")
+                                       : type == FfsSuspend ? QStringLiteral("SUSPEND (bus idle/reset)")
+                                                            : QStringLiteral("UNBIND")));
                     // FIFO state is gone; any in-flight AA/TLS frame is already
                     // truncated on the host. Fail so we reconnect cleanly.
                     qCWarning(lcFfs) << "ep0 reset event" << type << "after HU traffic — failing session";
@@ -257,7 +268,9 @@ void UsbFfsTransport::write(const QByteArray &data)
 
     const char *p = data.constData();
     qint64 left = data.size();
+    m_bytes += left;
     int stallMs = 0;
+    int frameWaitMs = 0;
     constexpr int kStallLimitMs = 10000;
     while (left > 0 && m_ep1 >= 0) {
         // Cap each transfer so an oversized frame cannot trip the UDC's
@@ -276,7 +289,11 @@ void UsbFfsTransport::write(const QByteArray &data)
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 struct timespec ts { 0, 2 * 1000 * 1000 }; // 2 ms
                 ::nanosleep(&ts, nullptr);
+                if (stallMs == 0)
+                    ++m_waits;
                 stallMs += 2;
+                frameWaitMs += 2;
+                m_maxWaitMs = qMax(m_maxWaitMs, frameWaitMs);
                 if (stallMs >= kStallLimitMs) {
                     qCWarning(lcFfs) << "ep1 write stalled >" << kStallLimitMs << "ms — failing session";
                     fail(QStringLiteral("ep1 write stalled"));
@@ -289,6 +306,18 @@ void UsbFfsTransport::write(const QByteArray &data)
             return;
         }
     }
+}
+
+QString UsbFfsTransport::takeStats()
+{
+    QMutexLocker lock(&m_writeMutex);
+    QString s = QStringLiteral("usb out %1 KB").arg(m_bytes / 1024);
+    if (m_waits)
+        s += QStringLiteral(", car not reading %1x (longest %2 ms)").arg(m_waits).arg(m_maxWaitMs);
+    m_waits = 0;
+    m_maxWaitMs = 0;
+    m_bytes = 0;
+    return s;
 }
 
 QString UsbFfsTransport::describe() const

@@ -14,6 +14,57 @@
 
 #include <gst/gst.h>
 
+#include <QDir>
+
+#include <csignal>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+#if defined(__GLIBC__)
+#include <execinfo.h>
+#endif
+
+// A crash used to leave no trace in carfish.log (the system journal needs
+// root to read). On a fatal signal, append the signal and a raw backtrace to
+// the log with async-signal-safe calls, then die the normal way.
+static int g_crashFd = -1;
+
+static void crashHandler(int sig)
+{
+    if (g_crashFd >= 0) {
+        char line[96];
+        const char *name = sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT" : sig == SIGBUS ? "SIGBUS"
+                         : sig == SIGFPE ? "SIGFPE" : sig == SIGILL ? "SIGILL" : "signal";
+        size_t n = 0;
+        const char *pre = "CRASH: Carfish died on ";
+        for (const char *p = pre; *p && n < sizeof(line) - 2; ++p) line[n++] = *p;
+        for (const char *p = name; *p && n < sizeof(line) - 2; ++p) line[n++] = *p;
+        line[n++] = '\n';
+        (void)!::write(g_crashFd, line, n);
+#if defined(__GLIBC__)
+        void *frames[48];
+        const int depth = backtrace(frames, 48);
+        backtrace_symbols_fd(frames, depth, g_crashFd);
+#endif
+    }
+    ::signal(sig, SIG_DFL);
+    ::raise(sig);
+}
+
+static void installCrashHandler()
+{
+    const QByteArray path = (QDir::homePath() + QStringLiteral("/carfish.log")).toLocal8Bit();
+    g_crashFd = ::open(path.constData(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+#if defined(__GLIBC__)
+    // backtrace() loads libgcc on first use, which is not safe inside a signal
+    // handler; warm it up now.
+    void *warm[1];
+    backtrace(warm, 1);
+#endif
+    for (int sig : { SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL })
+        ::signal(sig, crashHandler);
+}
+
 // Headless mode runs a session without the phone UI, e.g. over SSH on the
 // phone or on a desktop PC against a fake head unit:
 //   carfish --headless --mode tcp-server --cert c.pem --key k.pem
@@ -79,6 +130,7 @@ static int runHeadless(QGuiApplication &app)
 
 int main(int argc, char *argv[])
 {
+    installCrashHandler();
     gst_init(&argc, &argv);
 
 #ifdef CARFISH_DESKTOP
@@ -91,6 +143,9 @@ int main(int argc, char *argv[])
 
     QScopedPointer<QQuickView> view(SailfishApp::createView());
     Controller controller(view->engine());
+    controller.appendLog(QStringLiteral("app started (pid %1)").arg(QCoreApplication::applicationPid()));
+    QObject::connect(app.data(), &QCoreApplication::aboutToQuit, &controller,
+                     [&controller] { controller.appendLog(QStringLiteral("app closed")); });
     controller.setCarQml(QUrl::fromLocalFile(SailfishApp::pathTo(QStringLiteral("carqml/CarMain.qml")).toLocalFile()));
     view->rootContext()->setContextProperty(QStringLiteral("controller"), &controller);
     view->setSource(SailfishApp::pathToMainQml());

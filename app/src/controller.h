@@ -123,13 +123,16 @@ signals:
     void trafficEnabledChanged();
     void batteryCapacityKwhChanged();
 
+public:
+    // Durable log line (carfish.log, journal and the in-app log).
+    void appendLog(const QString &line);
+
 private slots:
     void onCablePlugged();
 
 private:
     void syncUsbAutoStartUnit();
     void setState(const QString &state);
-    void appendLog(const QString &line);
     void scrubOldLog();
     void startSession(Transport *transport);
     void endSession(const QString &reason);
