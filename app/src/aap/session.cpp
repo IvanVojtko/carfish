@@ -38,6 +38,38 @@ static quint64 monotonicUs()
     return quint64(ts.tv_sec) * 1000000u + quint64(ts.tv_nsec) / 1000u;
 }
 
+// The app icon as a size x size PNG, for the service discovery request.
+static QByteArray iconPng(int size)
+{
+    static const char *const kPaths[] = {
+        "/usr/share/icons/hicolor/172x172/apps/carfish.png",
+        "/usr/share/icons/hicolor/128x128/apps/carfish.png",
+        "/usr/share/icons/hicolor/108x108/apps/carfish.png",
+        "/usr/share/icons/hicolor/86x86/apps/carfish.png",
+    };
+    QImage img;
+    for (const char *path : kPaths) {
+        if (img.load(QString::fromLatin1(path)))
+            break;
+    }
+    if (img.isNull()) {
+        // Not installed (host build): a plain blue disc.
+        img = QImage(size, size, QImage::Format_ARGB32_Premultiplied);
+        img.fill(Qt::transparent);
+        QPainter p(&img);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(0x1e, 0x88, 0xe5));
+        p.drawEllipse(QRectF(0, 0, size, size));
+    }
+    img = img.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    QByteArray png;
+    QBuffer buf(&png);
+    buf.open(QIODevice::WriteOnly);
+    img.save(&buf, "PNG");
+    return png;
+}
+
 static QSize resolutionSize(int res)
 {
     switch (res) {
@@ -226,6 +258,24 @@ void Session::onControl(const Message &msg)
     log(tr("ctrl rx id %1 (%2 B)").arg(msg.id()).arg(body.size()));
     switch (msg.id()) {
     case MSG_VERSION_REQUEST: {
+        if (m_phase != Phase::WaitVersion) {
+            // The head unit gave up on the handshake (e.g. it didn't like our
+            // service discovery request) and started over in plain text. Start
+            // over with it: answering on the old encrypted link only earns an
+            // "unexpected message" from the car.
+            if (m_phase == Phase::Running || ++m_restarts > 2) {
+                fail(tr("head unit restarted the handshake"));
+                return;
+            }
+            log(tr("head unit restarted the handshake (it got no usable reply); starting over"));
+            QString error;
+            if (!m_cryptor.init(Cryptor::Role::Server, m_config.certPath, m_config.keyPath, &error)) {
+                fail(error);
+                return;
+            }
+            m_encrypt = false;
+            m_phase = Phase::WaitVersion;
+        }
         if (body.size() >= 4) {
             const auto *p = reinterpret_cast<const uchar *>(body.constData());
             m_huMajor = qFromBigEndian<quint16>(p);
@@ -274,10 +324,23 @@ void Session::onControl(const Message &msg)
         m_encrypt = true;
         m_phase = Phase::Discovery;
         emit stateChanged(tr("Service discovery"));
+        // Like Gearhead: three PNG icons (32/64/128), a label and
+        // "Manufacturer Model". Some head units (older Hyundai, protocol 1.0)
+        // never answer a request without the icons.
         ServiceDiscoveryRequest req;
+        const QByteArray small = iconPng(32), medium = iconPng(64), large = iconPng(128);
+        if (!small.isEmpty())
+            req.set_small_icon(small.constData(), size_t(small.size()));
+        if (!medium.isEmpty())
+            req.set_medium_icon(medium.constData(), size_t(medium.size()));
+        if (!large.isEmpty())
+            req.set_large_icon(large.constData(), size_t(large.size()));
         req.set_label(m_config.label.toStdString());
         req.set_device_name(m_config.deviceName.toStdString());
-        send(0, MSG_SERVICE_DISCOVERY_REQUEST, req.SerializeAsString());
+        const std::string sdr = req.SerializeAsString();
+        log(tr("ctrl tx service discovery request (%1 B, icons %2/%3/%4 B)")
+                .arg(sdr.size()).arg(small.size()).arg(medium.size()).arg(large.size()));
+        send(0, MSG_SERVICE_DISCOVERY_REQUEST, sdr);
         break;
     }
     case MSG_SERVICE_DISCOVERY_RESPONSE:

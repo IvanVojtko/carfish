@@ -168,6 +168,7 @@ private:
     Framer m_framer;
     Cryptor m_cryptor;
     Phase m_phase = Phase::WaitVersion;
+    int m_restarts = 0;          // head-unit-initiated handshake restarts
     bool m_encrypt = false;
     int m_huMajor = 0;
     int m_huMinor = 0;

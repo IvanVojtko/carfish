@@ -29,6 +29,7 @@ import argparse
 import os
 import queue
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -56,6 +57,7 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
         self.aap_major, self.aap_minor = aap_version
         self.scale = scale
         self.audio_session = None
+        self.ignore_sdr = int(os.environ.get("SIM_IGNORE_SDR", "0"))
         self.media_audio_channel = None
         self.nav_channel = None          # instrument-cluster nav (service id 6)
         self.np_channel = None           # now playing (media playback status, service id 9)
@@ -102,6 +104,22 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
                         self.encrypted = True
                         print(f"HU: TLS up ({self.tls.version()} {self.tls.cipher()[0]}), AUTH_COMPLETE")
                         return
+
+    def restart_handshake(self):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        self.inc, self.outg = ssl.MemoryBIO(), ssl.MemoryBIO()
+        self.tls = ctx.wrap_bio(self.inc, self.outg, server_side=False)
+        self.tls_done = False
+        self.encrypted = False
+        self.rx = b""
+        self.partial = {}
+        timeout = self.sock.gettimeout()
+        self.sock.settimeout(None)
+        self.handshake()
+        self.sock.settimeout(timeout)
 
     # --- service discovery: video (with margins) + media audio + input + mic --
     def discovery_response(self):
@@ -192,7 +210,16 @@ class HeadUnitSim(fake_hu.FakeHeadUnit):
         if ch == 0:
             if mid == 5:
                 req = pb.ServiceDiscoveryRequest.FromString(body)
-                print(f"HU: SERVICE_DISCOVERY_REQUEST from '{req.device_name}'")
+                print(f"HU: SERVICE_DISCOVERY_REQUEST from '{req.device_name}' label '{req.label}' "
+                      f"icons {len(req.small_icon)}/{len(req.medium_icon)}/{len(req.large_icon)} B")
+                if self.ignore_sdr > 0:
+                    # SIM_IGNORE_SDR=n: act like a picky head unit that drops the
+                    # request, waits 3 s and restarts the handshake in plain text.
+                    self.ignore_sdr -= 1
+                    print("HU: ignoring it; restarting the handshake in 3 s")
+                    time.sleep(3)
+                    self.restart_handshake()
+                    return
                 self.send(0, 6, self.discovery_response())
             elif mid == 16:
                 print("HU: BYEBYE")
