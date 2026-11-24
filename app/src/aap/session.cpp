@@ -192,6 +192,18 @@ void Session::logStats()
     log(line);
 }
 
+void Session::trace(bool tx, quint8 channel, quint16 id, int size)
+{
+    // Skip the media stream itself (frames, acks) and pings.
+    if (channel != 0 && (id == MEDIA_DATA || id == MEDIA_ACK))
+        return;
+    if (channel == 0 && (id == MSG_PING_REQUEST || id == MSG_PING_RESPONSE))
+        return;
+    if (m_trace.size() >= 12)
+        m_trace.removeFirst();
+    m_trace.append({ qint64(monotonicUs() / 1000), channel, id, size, tx });
+}
+
 void Session::noteUnhandled(const char *what, quint8 channel, quint16 id, int size)
 {
     const quint32 key = (quint32(channel) << 16) | id;
@@ -243,6 +255,14 @@ void Session::fail(const QString &reason)
     if (m_phase == Phase::Closed)
         return;
     log(QStringLiteral("session failed: ") + reason);
+    if (m_phase == Phase::Running && !m_trace.isEmpty()) {
+        const qint64 now = qint64(monotonicUs() / 1000);
+        QStringList parts;
+        for (const Trace &t : m_trace)
+            parts << QStringLiteral("%1 ch%2 0x%3 %4B -%5s").arg(t.tx ? QStringLiteral("tx") : QStringLiteral("rx"))
+                         .arg(t.channel).arg(t.id, 0, 16).arg(t.size).arg((now - t.ms) / 1000.0, 0, 'f', 1);
+        log(QStringLiteral("last messages: ") + parts.join(QStringLiteral(", ")));
+    }
     stopVideo();
     m_audio->stop();
     m_mic->end();
@@ -259,6 +279,7 @@ void Session::send(quint8 channel, quint16 id, const QByteArray &body, bool cont
     m.control = control;
     m.encrypted = m_encrypt;
     m.payload = makePayload(id, body);
+    trace(true, channel, id, body.size());
     const QByteArray wire = m_framer.encode(m);
     if (wire.isEmpty()) {
         fail(QStringLiteral("cannot encode message %1 on channel %2").arg(id).arg(channel));
@@ -305,6 +326,7 @@ void Session::onMessage(const Message &msg)
         return;
     ++m_rxMsgs;
     m_lastRxMs = qint64(monotonicUs() / 1000);
+    trace(false, msg.channel, msg.id(), msg.body().size());
     if (msg.channel == 0) {
         onControl(msg);
         return;
@@ -472,6 +494,7 @@ void Session::onServiceDiscovery(const QByteArray &body)
         fail(tr("malformed service discovery response"));
         return;
     }
+    m_carSeen = true;
     log(tr("Car: %1 %2, head unit %3 %4")
             .arg(QString::fromStdString(resp.make()), QString::fromStdString(resp.model()),
                  QString::fromStdString(resp.head_unit_make()), QString::fromStdString(resp.head_unit_model())));

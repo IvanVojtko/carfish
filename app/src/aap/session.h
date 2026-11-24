@@ -34,6 +34,10 @@ class Session : public QObject
 {
     Q_OBJECT
 public:
+    // True once the car answered service discovery (a real session, not a
+    // failed bring-up): a drop after that is worth reconnecting.
+    bool reachedCar() const { return m_carSeen; }
+
     struct Config {
         QString certPath;
         QString keyPath;
@@ -229,6 +233,13 @@ private:
     int m_rxMsgs = 0;
     qint64 m_lastRxMs = 0;
     QSet<quint32> m_unhandledSeen;
+
+    // The last few non-media messages each way, logged when the session fails,
+    // so a car that drops us shows what was said right before.
+    struct Trace { qint64 ms; quint8 channel; quint16 id; int size; bool tx; };
+    void trace(bool tx, quint8 channel, quint16 id, int size);
+    QVector<Trace> m_trace;
+    bool m_carSeen = false;
 };
 
 } // namespace aap

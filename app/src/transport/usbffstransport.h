@@ -3,7 +3,10 @@
 #include "transport.h"
 
 #include <QMutex>
+#include <QQueue>
 #include <QThread>
+#include <QTimer>
+#include <QWaitCondition>
 #include <atomic>
 
 // Wired Android Auto over a FunctionFS accessory gadget.
@@ -26,6 +29,7 @@
 // re-checks the AOA protocol version on the freshly enumerated gadget); the
 // helper keeps a separate ep0 handle open only to hold the gadget alive.
 class UsbFfsReader;
+class UsbFfsWriter;
 class UsbFfsEp0Pump;
 
 class UsbFfsTransport : public Transport
@@ -45,6 +49,7 @@ private slots:
     void onReadChunk(const QByteArray &data);
     void onReadFailed(const QString &error);
     void onEp0Fatal(const QString &error);
+    void checkWriter();
 
 private:
     void fail(const QString &why);
@@ -54,15 +59,51 @@ private:
     int m_ep1 = -1; // IN  (write to HU)
     int m_ep2 = -1; // OUT (read from HU)
     UsbFfsReader *m_reader = nullptr;
+    UsbFfsWriter *m_writer = nullptr;
     UsbFfsEp0Pump *m_pump = nullptr;
-    QMutex m_writeMutex;
+    QTimer m_watchdog; // fails the session if the car stops reading
     std::atomic_bool m_active{false}; // HU has actually sent bytes
     std::atomic_bool m_dead{false};
-    // ep1 back-pressure since the last takeStats(): how often the host was not
-    // reading (EAGAIN) and the longest a single frame had to wait.
-    int m_waits = 0;
-    int m_maxWaitMs = 0;
+};
+
+// ep1 (device->host) writer thread. A FunctionFS write blocks in the kernel
+// until the car has read the data (O_NONBLOCK only covers a disabled
+// endpoint), so writing from the GUI thread froze the whole app whenever the
+// car stopped reading. Frames are queued here in send order instead.
+class UsbFfsWriter : public QThread
+{
+    Q_OBJECT
+public:
+    explicit UsbFfsWriter(int fd) : m_fd(fd) {}
+    bool enqueue(const QByteArray &frame); // false: queue over its limit
+    void shutdown();                       // stop, interrupting a blocked write
+    qint64 blockedMs() const;              // how long the current write has been stuck
+    qint64 queuedBytes();
+    QString takeStats();
+
+signals:
+    void failed(const QString &error);
+
+protected:
+    void run() override;
+
+private:
+    bool writeFrame(const QByteArray &frame);
+
+    int m_fd;
+    std::atomic_bool m_running{true};
+    std::atomic<qint64> m_busySinceMs{0};
+public:
+    std::atomic<unsigned long> m_tid{0};
+private:
+    QMutex m_mutex;
+    QWaitCondition m_cond;
+    QQueue<QByteArray> m_queue;
+    qint64 m_queued = 0;
+    // since the last takeStats()
     qint64 m_bytes = 0;
+    int m_slow = 0;      // frames that waited > 100 ms for the car
+    qint64 m_maxWaitMs = 0;
 };
 
 // Blocking ep2 (host->device) reader thread.
@@ -72,6 +113,7 @@ class UsbFfsReader : public QThread
 public:
     explicit UsbFfsReader(int fd) : m_fd(fd) {}
     std::atomic_bool running{true};
+    std::atomic<unsigned long> tid{0};
 
 signals:
     void chunk(const QByteArray &data);
@@ -93,6 +135,7 @@ class UsbFfsEp0Pump : public QThread
 public:
     UsbFfsEp0Pump(int fd, std::atomic_bool *active) : m_fd(fd), m_active(active) {}
     std::atomic_bool running{true};
+    std::atomic<unsigned long> tid{0};
 
 signals:
     void fatal(const QString &error);

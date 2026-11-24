@@ -155,8 +155,8 @@ Controller::Controller(QQmlEngine *engine, QObject *parent)
         if (!m_usbAuto)
             return;
         m_usbAuto = false;
-        appendLog(tr("USB: no car started Android Auto within 15 s (a computer or charger?); "
-                     "normal USB is back"));
+        appendLog(tr("USB: no car started Android Auto within %1 s; normal USB is back")
+                      .arg(m_usbAutoTimer.interval() / 1000));
         stop();
         m_mode = m_usbAutoPrevMode;
         m_settings.setValue(QStringLiteral("mode"), m_mode);
@@ -218,7 +218,7 @@ void Controller::startUsbAuto(bool launched)
     if (!m_running)
         return;
     m_usbAuto = true;
-    m_usbAutoTimer.start();
+    m_usbAutoTimer.start(15000);
 }
 
 Controller::~Controller()
@@ -619,6 +619,7 @@ void Controller::startSession(Transport *transport)
     else if (!m_audioDevice.isEmpty())
         cfg.audioDevice = m_audioDevice;
     m_session = new aap::Session(transport, m_screen, cfg, this);
+    m_sessionClock.start();
     connect(m_session.data(), &aap::Session::stateChanged, this, &Controller::setState);
     connect(m_session.data(), &aap::Session::logMessage, this, &Controller::appendLog);
     // Steering-wheel media buttons drive the chosen media app over MPRIS.
@@ -661,6 +662,32 @@ void Controller::startSession(Transport *transport)
             // BlueZ throughout; the next readyForProjection replaces the session.
             setState(tr("Reconnecting to head unit"));
             m_wireless->retrySoon();
+        } else if (m_mode == Usb && m_running && m_session && m_session->reachedCar()) {
+            // The car dropped a running wired session (some cars reset USB or
+            // restart Android Auto now and then). Wait for it to come back
+            // instead of leaving the user to press Start; a session that lasted
+            // a while resets the retry budget.
+            if (m_sessionClock.elapsed() > 30000)
+                m_usbReconnects = 0;
+            endSession(reason);
+            if (m_usbReconnects < 3) {
+                ++m_usbReconnects;
+                m_usbReconnectPending = true;
+                appendLog(tr("USB: reconnecting to the car (attempt %1)").arg(m_usbReconnects));
+                setState(tr("Reconnecting to the car (USB)"));
+                QTimer::singleShot(1500, this, [this] {
+                    if (!m_usbReconnectPending || m_running)
+                        return;
+                    m_usbReconnectPending = false;
+                    m_usbAutoPrevMode = Usb;
+                    start(Usb);
+                    if (!m_running)
+                        return;
+                    // No car within 30 s (cable pulled): give normal USB back.
+                    m_usbAuto = true;
+                    m_usbAutoTimer.start(30000);
+                });
+            }
         } else {
             endSession(reason);
         }
@@ -687,6 +714,7 @@ void Controller::startSession(Transport *transport)
 
 void Controller::stop()
 {
+    m_usbReconnectPending = false;
     endSession(tr("stopped"));
 }
 

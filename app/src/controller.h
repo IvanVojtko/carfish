@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QSettings>
 #include <QSize>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QUrl>
 #include <QVariantList>
@@ -150,6 +151,9 @@ private:
     bool m_usbAutoLaunched = false; // ... and the app was launched just for it
     int m_usbAutoPrevMode = 0;      // the mode to put back if no car answers
     QTimer m_usbAutoTimer;
+    int m_usbReconnects = 0;            // automatic USB reconnects in a row
+    bool m_usbReconnectPending = false; // one is scheduled (cancelled by Stop)
+    QElapsedTimer m_sessionClock;       // since the current session started
     AppRegistry *m_apps;
     MprisController *m_mpris;
     PhoneManager *m_phone;
