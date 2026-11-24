@@ -280,12 +280,15 @@ void Session::send(quint8 channel, quint16 id, const QByteArray &body, bool cont
     m.encrypted = m_encrypt;
     m.payload = makePayload(id, body);
     trace(true, channel, id, body.size());
-    const QByteArray wire = m_framer.encode(m);
-    if (wire.isEmpty()) {
+    const QVector<QByteArray> frames = m_framer.encodeFrames(m);
+    if (frames.isEmpty()) {
         fail(QStringLiteral("cannot encode message %1 on channel %2").arg(id).arg(channel));
         return;
     }
-    m_transport->write(wire);
+    // One transport write per frame: over USB that is one bulk transfer each,
+    // as with the official phone (Mobis head units need it).
+    for (const QByteArray &f : frames)
+        m_transport->write(f);
 }
 
 void Session::send(quint8 channel, quint16 id, const std::string &body, bool control)

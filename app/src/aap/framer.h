@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QHash>
 #include <QObject>
+#include <QVector>
 #include <functional>
 
 namespace aap {
@@ -16,9 +17,18 @@ enum FrameFlag : quint8 {
 };
 
 constexpr int kHeaderSize = 2;          // channel, flags
-// Android Auto limits a whole frame (header + payload) to 16128 bytes.
+// The official phone never sends a whole frame (header + payload) over 16128
+// bytes, and Hyundai/Kia (Mobis) head units size their receive buffer to it.
 constexpr int kMaxFrameSize = 16128;
-constexpr int kMaxFramePayload = kMaxFrameSize - 8;
+// A TLS 1.2 AES-GCM record wraps each encrypted chunk in 5 header + 8
+// explicit nonce + 16 tag bytes. Taken off the plaintext chunk so an encrypted
+// first fragment still fits kMaxFrameSize (it came out at 16157 before).
+constexpr int kTlsOverhead = 5 + 8 + 16;
+constexpr int kMaxFramePayload = kMaxFrameSize - 8 - kTlsOverhead;
+// USB high-speed bulk max packet size. A transfer whose length is an exact
+// multiple of it has no short packet to end it, so the head unit's read runs on
+// into the next frame; frames are sized to avoid that (see encodeFrames).
+constexpr int kUsbMaxPacket = 512;
 
 struct Message {
     quint8 channel = 0;
@@ -44,7 +54,11 @@ public:
     void setEncrypt(CryptFn fn) { m_encrypt = std::move(fn); }
     void setDecrypt(CryptFn fn) { m_decrypt = std::move(fn); }
 
-    QByteArray encode(const Message &msg) const;
+    // One entry per frame. Over USB each frame must go out as its own bulk
+    // transfer: Mobis head units parse exactly one frame per transfer and
+    // reset USB when a frame is split across transfers or two share one.
+    QVector<QByteArray> encodeFrames(const Message &msg) const;
+    QByteArray encode(const Message &msg) const; // all frames joined
 
     // Feed raw bytes from the transport. Calls onMessage for every complete
     // message. Returns false on a fatal protocol error.

@@ -23,6 +23,13 @@ static constexpr int kReadBuffer = 127 * 512; // ~64 KiB
 // was written. The host reassembles the AAP byte stream regardless of how the
 // writes are split, so cap each write well under that limit.
 static constexpr int kWriteChunk = 16 * 1024;
+// The session hands us one AAP frame per write() (at most 16128 bytes), so
+// each frame is one write syscall = one bulk transfer, as the head unit needs.
+
+// High-speed bulk max packet size: a transfer of an exact multiple of it needs
+// a zero-length packet to end it (the framer avoids such sizes; this is the
+// backstop, e.g. for a cipher whose overhead the framer didn't predict).
+static constexpr int kMaxPacket = 512;
 
 // The car must take our data within this long, or the session is failed (and
 // reconnected) instead of hanging. Media flow control keeps the queue small
@@ -465,6 +472,14 @@ bool UsbFfsWriter::writeFrame(const QByteArray &frame)
             emit failed(QString::fromLocal8Bit(strerror(err)));
         }
         return false;
+    }
+    if (m_zlp && frame.size() % kMaxPacket == 0) {
+        char none = 0;
+        const ssize_t z = ::write(m_fd, &none, 0);
+        if (z < 0 && errno != EINTR && errno != EAGAIN) {
+            qCWarning(lcFfs) << "ep1 zero-length packet not supported:" << strerror(errno);
+            m_zlp = false;
+        }
     }
     const qint64 took = monoMs() - started;
     QMutexLocker lock(&m_mutex);

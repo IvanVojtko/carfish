@@ -36,14 +36,25 @@ static void putU32(QByteArray &b, quint32 v)
     b.append(tmp, 4);
 }
 
-QByteArray Framer::encode(const Message &msg) const
+QVector<QByteArray> Framer::encodeFrames(const Message &msg) const
 {
-    QByteArray out;
+    QVector<QByteArray> frames;
     const int total = msg.payload.size();
     int offset = 0;
     do {
-        const int chunk = qMin(kMaxFramePayload, total - offset);
+        int chunk = qMin(kMaxFramePayload, total - offset);
         const bool first = offset == 0;
+        // Keep the frame length off a multiple of the USB max packet size, so
+        // the transfer ends with a short packet. Taking one byte off a chunk
+        // moves it to the next fragment (a single-frame message becomes two).
+        // The encrypted size assumes AES-GCM (what head units negotiate); the
+        // USB writer adds a zero-length packet if a frame still lands on one.
+        auto frameSize = [&](int c) {
+            const bool multiFirst = first && offset + c < total;
+            return 4 + (multiFirst ? 4 : 0) + c + (msg.encrypted ? kTlsOverhead : 0);
+        };
+        if (chunk > 1 && frameSize(chunk) % kUsbMaxPacket == 0)
+            --chunk;
         const bool last = offset + chunk == total;
 
         QByteArray data = msg.payload.mid(offset, chunk);
@@ -51,7 +62,7 @@ QByteArray Framer::encode(const Message &msg) const
             QByteArray enc;
             if (!m_encrypt || !m_encrypt(data, enc)) {
                 qCWarning(lcFramer) << "encryption failed on channel" << msg.channel;
-                return QByteArray();
+                return {};
             }
             data = enc;
         }
@@ -66,14 +77,25 @@ QByteArray Framer::encode(const Message &msg) const
         if (msg.encrypted)
             flags |= FlagEncrypted;
 
+        QByteArray out;
+        out.reserve(8 + data.size());
         out.append(char(msg.channel));
         out.append(char(flags));
         putU16(out, quint16(data.size()));
         if (first && !last)
             putU32(out, quint32(total));
         out.append(data);
+        frames.append(out);
         offset += chunk;
     } while (offset < total);
+    return frames;
+}
+
+QByteArray Framer::encode(const Message &msg) const
+{
+    QByteArray out;
+    for (const QByteArray &f : encodeFrames(msg))
+        out.append(f);
     return out;
 }
 

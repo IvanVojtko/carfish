@@ -91,6 +91,7 @@ private:
     bool writeFrame(const QByteArray &frame);
 
     int m_fd;
+    bool m_zlp = true; // end 512-multiple frames with a zero-length packet
     std::atomic_bool m_running{true};
     std::atomic<qint64> m_busySinceMs{0};
 public:
