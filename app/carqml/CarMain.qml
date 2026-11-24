@@ -124,6 +124,10 @@ Rectangle {
     readonly property real railT: Math.round((root.landscape ? width : height) * (root.landscape ? 0.11 : 0.1))
     readonly property real pad: Math.round(root.unit * 0.025)
     readonly property real rad: Math.round(root.unit * 0.03)
+    // Smallest comfortable touch target, in head-unit pixels (~160 dpi panels).
+    // Proportional sizes are floored to it, so small screens like an 800x480
+    // Hyundai still get usable buttons; large screens keep their proportions.
+    readonly property real touch: 44
 
     // Right-hand drive (car Settings screen): the whole layout mirrors so the
     // nav rail and map controls sit on the driver's side.
@@ -147,7 +151,11 @@ Rectangle {
 
     // Map dominates (like Android Auto); the now-playing pane is a thin strip.
     readonly property real mapSplit: 0.76
-    readonly property real mapW: root.landscape ? Math.round(root.sw * root.mapSplit - root.pad / 2) : root.sw
+    // ...but wide enough for three touch-sized transport buttons on small screens.
+    readonly property real medMinW: Math.round(root.touch * 4.4)
+    readonly property real mapW: root.landscape ? Math.round(Math.min(root.sw * root.mapSplit - root.pad / 2,
+                                                                     root.sw - root.pad - root.medMinW))
+                                                : root.sw
     readonly property real mapH: root.landscape ? root.sh : Math.round(root.sh * root.mapSplit - root.pad / 2)
     readonly property real medX: root.landscape ? (root.rhd ? root.sx : root.sx + root.mapW + root.pad) : root.sx
     readonly property real medY: root.landscape ? root.sy : root.sy + root.mapH + root.pad
@@ -170,7 +178,7 @@ Rectangle {
     // Tap the map to expand it full-screen (media collapses to a bottom
     // minibar); tap the minibar to return to split view (Android Auto style).
     property bool mapExpanded: false
-    readonly property real minibarH: Math.round(unit * 0.12)
+    readonly property real minibarH: Math.round(Math.max(root.unit * 0.12, Math.min(root.unit * 0.16, root.touch * 1.6)))
     // destination search / navigation (driven by MapPane, id realMap)
     property bool searching: false
     property string searchText: ""
@@ -601,7 +609,7 @@ Rectangle {
             property bool on: visible && carScreen.trafficEnabled
             anchors.left: parent.left; anchors.top: parent.top
             anchors.leftMargin: root.pad; anchors.topMargin: mapPane.ctrlTop
-            width: Math.round(root.unit * 0.056); height: width; radius: width * 0.28
+            width: Math.round(Math.max(root.unit * 0.07, root.touch)); height: width; radius: width * 0.28
             color: on ? root.accent : root.surface
             Canvas {
                 anchors.centerIn: parent
@@ -644,7 +652,7 @@ Rectangle {
             anchors.leftMargin: root.pad
             // sit below the traffic button when it's showing, else at the top control row.
             anchors.topMargin: mapPane.ctrlTop + (trafficBtn.visible ? trafficBtn.height + root.pad : 0)
-            width: Math.round(root.unit * 0.056); height: width; radius: width / 2
+            width: Math.round(Math.max(root.unit * 0.07, root.touch)); height: width; radius: width / 2
             color: root.surface
             Canvas {
                 id: compassFace
@@ -1068,7 +1076,9 @@ Rectangle {
         // of buttons. Right-aligned in strip mode, bottom-centred in column mode.
         Item {
             id: controls
-            property real btn: mediaPane.uh * (mediaPane.strip ? 0.36 : 0.22)
+            property real btn: mediaPane.strip
+                               ? Math.max(mediaPane.uh * 0.36, Math.min(mediaPane.uh * 0.56, root.touch * 0.8))
+                               : mediaPane.uh * 0.23
             property real sp: mediaPane.uh * (mediaPane.strip ? 0.08 : 0.055)
             width: btn * 3.2 + sp * 2
             height: btn * 1.2
