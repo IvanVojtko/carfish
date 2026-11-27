@@ -1,6 +1,6 @@
 Name:       carfish
 Summary:    Android Auto projection for Sailfish OS
-Version:    0.3.0
+Version:    0.4.0
 Release:    1
 License:    GPLv3
 URL:        https://example.org/carfish
